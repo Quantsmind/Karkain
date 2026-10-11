@@ -3195,3 +3195,200 @@ remains stale/red by the same decision as 22.6/23.6/24.10/25.7** -- last measure
 Step 9a, moved by 9b-9f, deliberately **not predicted**. `kccOwnsNativeTargets` stays
 `false`; **151A is not closed** -- concatenation (and therefore the arena), slicing,
 comparison, `for-in`, `push`, records, maps and the macOS entry/exit remain open.
+
+Also completed: **151A Step 9g - string concatenation and the arena allocator in
+kcc** (increment 151, slice A step 9g; verdict **COMPLETE**; record
+`docs/audit/PHASE-151A-BASELINE.md` section 27). kcc can concatenate strings
+natively and print the result. **Verified by execution**, exact stdout bytes
+from kcc-produced PEs run on this host: `print("ab" + "cd")` -> `616263640a`
+(`"abcd\n"`), `print("" + "cd")` -> `63640a`, `print("ab" + "")` -> `61620a`,
+`print("" + "")` -> `0a`, and two separately bound locals `a + b` ->
+`616263640a`. The arena bound is a **proof, not an estimate**: `sites *
+totalLiteralBytes + 16`, sound because every string value in a concatenating
+program is a literal or a concatenation of literals and every site executes at
+most once (the driver lowers no loop, so a loop-contained concat is refused
+before emission). Exhaustion stays a defensive `Int3` rather than an
+out-of-bounds write.
+
+**Two real defects, both of which produced a STRUCTURALLY VALID PE that then
+faulted at runtime** -- the worst class for a native backend, because neither
+the linker nor `ParsePE` checks opcode semantics. (1) **`natMask(72)` returned
+11, not 7**: documented as "the low three bits of a register number", 11 is
+`0b1011`, FOUR bits, so `r & natMask(72)` mis-masked every register field. It
+worked in 9d by luck (scaled accesses there use R9 and RDX, whose low bits
+survive) and broke in 9g where R10/R11 are used: `184 + (11 & 11) = 195 =
+0xC3`, the **RET** opcode, so the arena limit emitted a spurious `ret`. Fixed
+to 7. (2) **`natHeapRef` reused `natImm64Patch`**, whose `natMovImm64Op(rd) =
+184 + rd` is valid only for `rax..rdi`; it now emits `REX.W|REX.B` (`0x49`)
+and `B8 + (rd & 7)` directly. **Root cause of the earlier linker panic, also
+fixed and preserved**: the driver had TWO literal collectors that disagreed --
+the rodata-interning path did not descend through `BinaryExpr "+"` while the
+arena-sizing path did, so `print_str` was never emitted while the concat arm
+still called it, `natFinish` returned the STRING `"undefined label
+'print_str'"`, and that string was handed to `natPELink` as if it were code.
+The panic reported `natPEStore64` and had nothing to do with patch
+coordinates. The two collectors are now ONE function, so they cannot disagree
+again.
+
+**A corrective change landed the same day** (commit `e1a6400`, against the Step
+9g baseline, not new scope): two shapes reached EMISSION unchecked and died with
+`runtime error: array index out of range at ... natNativeSlotOff` --
+**chained** concatenation `print(a + b + "ef")` (the validator recurses through
+`BinaryExpr` so it passed, but `natEmitStrValue` assumes a non-literal operand
+is an identifier) and **`return a + "b"`** (a string is not a process exit
+status). Both are now refused by name. The rule is stated as the **NODE TYPE**,
+not "is it a literal or an identifier": a first draft refused every non-int
+node and broke 9e's `return len(a)`, which is a `CallExpr` returning an int --
+caught by running the 9e gate, which is the reason the rule reads as it does.
+**Chained and let-bound concatenation remain OPEN** -- recursion would need
+depth threaded through `natEmitStrValue`, `strTemp` sized for the deepest chain,
+and the arena bound re-proved per nesting level. Gate
+`pkg/cli/phase151a9g_concat_test.go`, `TestPhase151A9G_` 6 subtests (executed
+goldens, arena-bound proof, the R10/REX.B encoding, refusal table, image
+distinctness, corpus non-vacuity), with its own CI step whose pattern cannot
+collide with `TestPhase151A9H_`.
+
+Also completed: **151A Step 9h - records (structs) on the kcc native target**
+(increment 151, slice A step 9h; verdict **COMPLETE**; record
+`docs/audit/PHASE-151A-BASELINE.md` section 28). The record value model,
+reproduced from the Go oracle rather than inferred: the record VALUE is one
+8-byte unit whose content is the field-area ADDRESS; the field area follows the
+slot immediately at `slotOff + 8`; fields are laid out in declaration order with
+int/float one unit and string two, every unit 8-byte aligned, no padding rule.
+**Read and write share one addressing path by construction**: `natRecordBase`
+re-loads the field-area address from the record's frame slot into RBX before
+every access (no base register is carried across a field expression, following
+9d's array-element rule), and the store goes through `natStoreBaseOff(base=RBX,
+disp=off)` -- byte-for-byte the addressing `natRecordStoreLiteral` writes with,
+so a read and a write cannot disagree about where a field lives. Field offset
+and kind come from the SAME table; no second field table exists. Verified by
+execution with exact stdout: `Point{x:3,y:4}` -> `3` then `4` (two
+independently loaded fields, not one field twice), `p.x = 7` -> `7`, and a
+string field write proving BOTH units land (`s.label = "changed"` ->
+`changed`, where a pointer-only store would print a stale or garbage length).
+
+**A corrective change caught a shadowing defect** (commit `4a10e27`, against
+the 9h baseline): `natNativePlan(stmts, tbl)` opened with
+`let tbl = natStructTable(stmts)`, SHADOWING the caller's table with a rebuild
+from `main`'s BODY -- but top-level `type X struct {...}` declarations live at
+program level and never appear in a body, so the rebuilt table was always
+EMPTY, `natStructSizeOf` returned -1, the field area reserved ZERO bytes, and
+the frame was `round16(8) + 512 + 96 = 624` for EVERY record program, with the
+next local aliasing the first field (`Point{x,y}` + `let n = 5` printed
+`5/4/5`). Validated in an isolated worktree at the defective revision: 6 of 8
+frame subtests FAIL with the exact `624` signature, and all 8 pass after the
+one-line correction. The failing Linux CI run reported the identical signature,
+so it was the same defect and not a platform variant. **No new test was
+added** -- `TestPhase151A9H_FrameFollowsTheValueModelRule` already existed and
+was the thing that caught it. **Refused by name, deliberately**: string field
+reads through the `DotExpr` path, arithmetic over field reads, integer
+expression right-hand sides, field-read right-hand sides, assignment inside
+`if`/`while`/`for`, record parameters and record returns -- accepting any of
+these without an emitter arm would recreate the accept-without-emit state 9h
+had to repair. A bare `=` `BinaryExpr` statement is refused specifically so a
+`for` post cannot be mistaken for supported statement assignment. Gate
+`pkg/cli/phase151a9h_records_test.go`, `TestPhase151A9H_` 4 subtests.
+
+Also completed: **151D - kcc owns `native-x86_64-windows`** (increment 151,
+slice D; verdict **COMPLETE**; this is the ownership flip the 151 baseline
+named, and it is now `true`). The 151 baseline measured a silent Go fallback: a
+native target requested under kcc was built by the Go backend with no signal
+the engine had changed. 151D-first replaced that with a refusal; 151D hands the
+same seam the real thing. kcc now emits a native image for
+`native-x86_64-windows` through `natNativeProgram`, the SAME whole-program
+driver `karkain native-ast` drives and that the 9c/9e/9f/9g/9h gates prove --
+no new emitter was written and no Go code was reached for emission. Verified by
+**executing** the resulting PE on windows/amd64 (it printed `3\n4\n` for a
+record program), with the image structurally validated by the ORACLE's own
+`ParsePE`. `pkg/cli/kcc_native.go` implements the transition:
+`kccOwnsNativeTargets = true` with `kccNativeOwnedTargets` as named data so the
+ownership claim is assertable rather than re-derived at each dispatch site; the
+true arm runs kcc, **requires its provenance line BEFORE any hex is decoded**,
+decodes the hex kcc printed, validates with `ParsePE`, then writes. There is
+deliberately NO call into `cfreeBuildForOS` -- that would compile, would pass
+every parity test, and would reintroduce the exact dishonesty the seam exists
+to delete. `kccNativeAcceptOutput` is a pure function of kcc's output so the
+provenance gate is testable directly, and every rejection path leaves the
+caller nothing to write.
+
+**WHAT IS NOT CLAIMED.** kcc owns **Windows only**. It has no ELF or Mach-O
+emitter for a user program: `native_elf.kark` and `native_macho.kark` lower the
+FIXED reference corpora that 151C/151C2 compare against the Go oracle, and
+neither takes a program. Those two targets keep refusing with `error[K116]`
+naming the reason and remain Go-backend-only -- wiring this emitter to them
+would silently produce a **PE under a Linux or macOS target NAME**, which is a
+miscompile, not a limitation. `TestPhase151_NoSilentGoFallback` is now
+target-aware (Windows must emit with provenance and a structurally valid PE;
+Linux and macOS keep the K116/exit-6/no-image/provenance assertions);
+`TestPhase151D_ProvenanceGateAcceptsOnlyAttributedBytes` is the mutation gate
+(hex without provenance, provenance without an image marker, and hex inside a
+diagnostic must all yield no image) -- without a provenance check these all
+pass, which is the pinned regression. `host-targets.rst` gained the C-free
+native target table with real per-target ownership, and `installation.rst`
+states Go is reference-only **for those targets**, not globally (the Go
+toolchain is still needed to build the compiler itself).
+
+Also completed: **B2 seed-closure discovery job + the v1.2.0 scope amendment**
+(verdict **COMPLETE** as a change; **B2 itself remains OPEN and unproven** --
+the job is DISCOVERY, not a release gate). Two things landed. (1) A new
+`bootstrap-closure` CI job runs `TestBootstrap_SeedClosure` **isolated**, on
+purpose: PHASE-143 §F records five consecutive GitHub-runner deaths ~35s into
+the stage-2 transpile (exit 143, no witness line even unbuffered, no
+timer/OOM/crash fingerprint) while the seed smoke passes on the SAME runner, so
+the mechanism is proven but the minutes-long burn is not runner-safe. The job
+is **not listed as a required check**, so it reports red without blocking
+anything. Its verification step is explicit that **a skip, timeout, exit 143,
+or a partial stage build is a FAILURE, never a pass**: it rejects
+`--- SKIP:`, rejects any `FAIL`, and requires the witness line
+`seed closure: stage2 == stage3 bitwise identical`. `tee` writes the log
+incrementally so an external kill still leaves a partial log for upload, and
+`pipefail` keeps the step's status the test's rather than `tee`'s.
+**Evidence limitation stated rather than papered over**: the test's
+`cleanupBinaries` deletes `bin/karkain-{stage1,compiler1,compiler2,compiler3}`
+unconditionally when the test function returns, i.e. BEFORE an upload step can
+run, so the stage binaries cannot be retained by a workflow change alone; what
+IS retained is the complete log carrying each stage's size and SHA-256 prefix
+and the stage-2/stage-3 equality verdict. Retaining the binaries would need an
+env-gated escape hatch in `cleanupBinaries`, which is a separate change
+requiring its own approval. (2) An **owner-authorized amendment (2026-10-10)**
+carrying v1.2.0 closure conditions **2** (`stdlib_v2` with no C compiler) and
+**3** (`std.net` with no C compiler) to **v1.3.0 as UNMET**. The two conditions
+are recorded **verbatim and unedited** in `docs/release/v1.2.0-CHECKLIST.md`
+§2 -- reworded conditions are how a contract gets quietly weakened -- with
+status living only in §2.1, §4 and the §6 sign-off table. The reason is
+**measured, not preferential**: the native driver lowers **no function call at
+all**, and `pkg/native` has no socket emitter (`TestPhase152A_
+SocketCapabilityBoundaryRejected` proves `net_*` is rejected on the native
+target), so neither program can build natively yet. **Deferral is not a
+weakening and no v1.2.0 release-readiness claim follows**: six conditions must
+still hold and B2 remains to be investigated independently. The prohibited
+move -- redefining a condition so it could be reported green -- is exactly what
+this table exists to prevent.
+
+Also landed with the above: `docs/architecture/KARKAIN-LANGUAGE-COMPLETENESS.md`
+(new). It is an **architecture target specification**, not a roadmap and not a
+plan: it defines an L0-L10 completeness model and maps the authoritative GAP
+inventory (152 GAPs -- 136 `MM-*` area rows and 16 `K-*` stdlib rows --
+extracted mechanically, not estimated) onto it. It explicitly assigns **no**
+phase, version or implementation, preserves the three document layers (guide /
+`SPEC.md` / architecture), and claims nothing not evidenced elsewhere. It
+records its own boundaries honestly: L10 has no authoritative primary GAP row
+(reported as a finding, not repaired by inventing one), three synthesised
+records are quarantined as Domain Coverage Records that are **not** GAPs, and
+`MM-K-time` (time/date/duration) is recorded as a domain the inventory
+**cannot represent at all** -- not "assessed and found missing" but
+*unassessable*, because no row and no stdlib module exists for it. **The file
+also arrived with real on-disk encoding corruption** -- a cp1252/UTF-8
+double-encoding that mangled 491 characters into three-byte mojibake triples
+(an em-dash printed as three characters, a section sign as two) while 254
+genuine em-dashes survived, i.e. a MIXTURE in which a blanket round-trip is
+wrong in both directions (it raises on the genuine U+2192 arrows, which are not
+cp1252-encodable, and leaving it alone ships 491 mojibake markers). Repaired by
+building the inverse map from every codepoint whose UTF-8 bytes decode as
+cp1252 into a multi-character string, then longest-match-replacing; a genuine
+em-dash is a single character and is never a key, so the 254 real ones are
+untouchable. **Verified**: the file's ASCII content is byte-identical before
+and after (98754 characters), only 57 of 1158 lines changed, and the only
+non-ASCII characters remaining are the six legitimate ones (em-dash, middle
+dot, down-arrow, en-dash, section sign, right-arrow) with no U+FFFD and no
+BOM. Encoding-clean before commit.
