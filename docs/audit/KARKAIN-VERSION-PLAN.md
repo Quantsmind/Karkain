@@ -144,8 +144,8 @@ Notes on this matrix:
 | Version | Exit criteria |
 |---|---|
 | **1.1.0** | only the owner ceremony: tag `v1.1.0` on current `main`, CI archives + checksums, `verify-install`/`rc-journey` against the shipped binary, docs marker flip |
-| **1.2.0** | hello + `stdlib_v2` + one `std.net` program build/run with `gcc`/`clang`/`cl` **absent from `PATH`**; `stage2 == stage3` with **no Go toolchain**; native images byte-identical Go↔kcc; Go described as *reference only* in `installation.rst` |
-| **1.3.0** | OS stdlib modules ship (both engines); PM/scaffolding owned by kcc; generics v2 + `const` folding; linear types enforced; atomic surface with litmus goldens; **zero** Go-engine-only core rows |
+| **1.2.0** | hello with `gcc`/`clang`/`cl` **absent from `PATH`**; `stage2 == stage3` with **no Go toolchain**; native images byte-identical Go↔kcc where the gate requires parity; Go described as *reference only* in `installation.rst`; full QA battery. **Amended 2026-10-10 (owner-authorized):** the `stdlib_v2` and `std.net` no-C requirements are **carried over to v1.3.0 as UNMET** — see `docs/release/v1.2.0-CHECKLIST.md` §2.1 and §4 for the measured blockers and the v1.3.0 work items |
+| **1.3.0** | OS stdlib modules ship (both engines); **native function-call lowering plus a genuine `import std.*` program that builds and executes through the C-free native path** (carried over from v1.2.0 Condition 2); **a native networking capability with an explicit platform-support decision, and a real `std.net` program that builds and runs without a C compiler on each platform claimed as supported** (carried over from v1.2.0 Condition 3); PM/scaffolding owned by kcc; generics v2 + `const` folding; linear types enforced; atomic surface with litmus goldens; **zero** Go-engine-only core rows |
 | **1.4.0** | DWARF consumed (breakpoints/step); `prof`/SIMD/DWARF parity on kcc; KIR consumed by the backend; every known wrong-code class fixed or a loud `K1xx` |
 | **1.5.0** | `--target freestanding` links with no libc; WASM GC/components + `wit`; MSI/DEB/RPM/DMG artifacts install in clean environments; riscv64 real; Android triple |
 | **1.6.0** | full self-build ≤ 2.5 GB; one measured SSA→emit pass with a published bench delta; CLI startup budget; public registry **only if operated** |
@@ -229,11 +229,15 @@ are **not yet baselined**; a number is assigned when an increment is scheduled.
 **165 is free-floating CI/packaging work and is not a compiler dependency** — it
 can land at any point in the sequence without unblocking or blocking 150–154.
 
-The release closes **only** when every one of these holds:
+The release closes **only** when every one of these holds. Conditions **2** and
+**3** are recorded verbatim for integrity but are **carried over to v1.3.0 as
+UNMET** under the owner-authorized amendment of 2026-10-10; the amended v1.2.0
+gate is the remaining six, and `docs/release/v1.2.0-CHECKLIST.md` §2.1 is the
+authoritative statement.
 
 1. hello builds and runs with `gcc`, `clang` and `cl` all **absent from `PATH`**
-2. `stdlib_v2` works in that same no-C environment
-3. one `std.net` program builds and runs under the defined no-C constraint
+2. `stdlib_v2` works in that same no-C environment — **CARRIED OVER → v1.3.0 (unmet)**
+3. one `std.net` program builds and runs under the defined no-C constraint — **CARRIED OVER → v1.3.0 (unmet)**
 4. native images are **byte-identical** between the Go compiler and `kcc`
    wherever the gate requires parity
 5. `stage2 == stage3` — the self-hosted build is bit-reproducible
@@ -247,6 +251,14 @@ These conditions are **not weakened** to close the release. A version is not
 closed as "green except X": an unmet condition moves to the next version or to
 an explicit, written carry-over list. `AGENTS.md` carries the frozen-increment
 rule that governs how these are evidenced.
+
+The two carried-over conditions are unmet for measured reasons, not for want of
+evidence: the native driver lowers **no function call at all** (`src/compiler/
+native_value.kark` refuses any call, and every `std.*` capability is a call), and
+`pkg/native` has no socket emitter — `TestPhase152A_
+SocketCapabilityBoundaryRejected` proves `net_*` is rejected on the native
+target. Both are missing capability, and the v1.3.0 work items are recorded in
+`docs/release/v1.2.0-CHECKLIST.md` §4.
 
 **What 1.2.0 does not claim.** It does not make building the *compiler* C-free:
 after 154 the toolchain is Go-free but bootstrap still links through a C
@@ -345,8 +357,8 @@ any of them. They gate native/PM work, so they open 1.3.0 as increment 155.
 | Version | Increments | State | Blocker |
 |---|---|---|---|
 | 1.1.0 | 128–149 | **in-tree complete**, gates green | owner tag/archive ceremony |
-| 1.2.0 | 150, 151P0, 151, 152, 154, 165 | **open, in progress** - increment 150 **complete** (150A-150D); **151P0 complete** (bitwise operators, the P0 soundness precondition for 151B); 151 in progress (151D-first + 151A-1 + 151B + 151C (ELF) + 151C2 (Mach-O) + 151C3 (PE) done); 152/154/165 not started | none (151A: the native value model) |
-| 1.3.0 | 155, 156, 158, 159, 160, 161 | **planned, not baselined** — theme + exit criteria only; per-increment scope unwritten | needs the 1.2.0 native/lib baseline |
+| 1.2.0 | 150, 151P0, 151, 152, 154, 165 | **open, in progress** - increment 150 **complete** (150A-150D); **151P0 complete**; **151D complete** (`kccOwnsNativeTargets` flipped; kcc owns `native-x86_64-windows`, ELF/Mach-O remain Go-only and refuse K116); 152 partially delivered (152-A, 152-B0, 152-B1, 152-B2); 154/165 not started. **Closure conditions 2 and 3 carried over to v1.3.0 as UNMET** (owner-authorized 2026-10-10) | B2 (seed closure not runner-proven); conditions 4-8 open |
+| 1.3.0 | 155, 156, 158, 159, 160, 161 | **planned, not baselined** — theme + exit criteria only; per-increment scope unwritten. **Accepts two carry-over work items from v1.2.0**: native function-call lowering + a no-C `stdlib_v2` build-and-run gate (Condition 2), and native networking with a platform-support decision (Condition 3) | needs the 1.2.0 native/lib baseline |
 | 1.4.0 | 153, 157, 163, 164, 175, 176 | **planned, not baselined** | needs the 1.3.0 library rows |
 | 1.5.0 | 166, 167, 168, 169, 170, 171, 172 | **planned, not baselined** | macOS signing and BSD VM are owner/community items |
 | 1.6.0 | 162, 174, 179* | **planned, not baselined** | 179 needs an operated registry service |
