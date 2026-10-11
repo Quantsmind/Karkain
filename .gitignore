@@ -61,6 +61,10 @@ examples/12-scientific-computing/*.c
 examples/13-finance/*.c
 examples/14-security/*.c
 examples/15-developer-tools/*.c
+examples/04-networking/*.c
+examples/06-database/*.c
+examples/07-web/*.c
+examples/generics/*.c
 examples/probes/**/*.c
 examples/probes/**/*.c23
 *.c23
