@@ -163,6 +163,14 @@ func (p *Parser) ParseProgram() *Program {
 			p.nextToken()
 		}
 	}
+	// Drain lexical diagnostics (e.g. an unterminated string literal) recorded
+	// by the lexer into the parser's error list, so build/run/check reject the
+	// program with the same ExitCompile gate as any parse error. The lexer has
+	// no fmt dependency, so the "line N: msg" formatting happens here.
+	for _, le := range p.l.Errors {
+		p.Errors = append(p.Errors, fmt.Sprintf("line %d: %s", le.Line, le.Msg))
+		p.ErrorCols = append(p.ErrorCols, le.Col)
+	}
 	return prog
 }
 
@@ -407,6 +415,13 @@ func (p *Parser) parseFunc() *FuncDecl {
 	p.nextToken() // consume '{'
 
 	fn.Body = p.parseBlock()
+	// Phase: require the closing brace. parseBlock stops at '}' OR EOF, so a
+	// missing '}' used to leave curToken at EOF and the blind nextToken() below
+	// was a no-op — the function was accepted with an unterminated body and no
+	// diagnostic. Report it so an unterminated block can never build.
+	if p.curToken.Type != lexer.TokenRBrace {
+		p.addError("expected '}' to close function body")
+	}
 	p.nextToken() // consume '}'
 
 	// Phase 49: Escape analysis — mark variables that escape the function scope
@@ -656,11 +671,22 @@ func (p *Parser) parsePrint() *PrintStmt {
 	// (src/compiler/parser.kark parsePrint skips an optional '('). The Go
 	// parser used to consume '(' unconditionally, which made space-form
 	// `print x` swallow the value and eat the statement terminator.
+	paren := false
 	if p.curToken.Type == lexer.TokenLParen {
 		p.nextToken() // consume '('
+		paren = true
 	}
 	val := p.parseExpr()
-	if p.curToken.Type == lexer.TokenRParen {
+	if paren {
+		// A 'print(' that opened a paren must close it. Tolerating a missing
+		// ')' let `print("Hello"` (no close) build and run, silently dropping
+		// the intended call terminator. Report it when the paren is absent.
+		if p.curToken.Type != lexer.TokenRParen {
+			p.addError("expected ')' to close print(...)")
+		} else {
+			p.nextToken() // consume ')'
+		}
+	} else if p.curToken.Type == lexer.TokenRParen {
 		p.nextToken() // consume ')'
 	}
 	node := &PrintStmt{Value: val}
@@ -873,6 +899,13 @@ func (p *Parser) parseWhile() *WhileStmt {
 	condition := p.parseExpr()
 	p.unparenthesizedIfCondition = false
 
+	// A `while` with no parseable condition (e.g. a bare `while`) used to yield
+	// a nil condition and a `while (0)` loop whose body silently swallowed the
+	// following statements. Require a real condition.
+	if condition == nil {
+		p.addError("expected condition after 'while'")
+	}
+
 	p.nextToken() // consume '{'
 	body := p.parseBlock()
 	p.nextToken() // consume '}'
@@ -993,6 +1026,12 @@ func (p *Parser) parseIf() *IfStmt {
 	p.unparenthesizedIfCondition = true
 	condition := p.parseExpr()
 	p.unparenthesizedIfCondition = false
+
+	// An `if` with no parseable condition used to yield a nil condition and
+	// silently absorb the following block. Require a real condition.
+	if condition == nil {
+		p.addError("expected condition after 'if'")
+	}
 
 	p.nextToken() // consume '{'
 	consequence := p.parseBlock()
@@ -1365,6 +1404,13 @@ func (p *Parser) parseBinaryExpr(left Node, minPrec int) Node {
 				p.nextToken() // consume tag value
 				p.nextToken() // consume ')'
 				left = &TagExpr{Target: left, TagName: tagName, TagValue: tagValue}
+			} else {
+				// A trailing '@' that is neither @derive nor @tag (e.g. the
+				// infix `1 @ 2`). The old code consumed the '@' and the next
+				// token unconditionally and then dropped them when neither
+				// branch matched, so `let x = 1 @ 2` silently became `let x = 1`
+				// and built. Report it instead of discarding the tokens.
+				p.addError(fmt.Sprintf("unexpected '@%s' after expression (expected @derive(...) or @tag(...))", ident))
 			}
 		}
 
@@ -1432,6 +1478,14 @@ func (p *Parser) parseBinaryExpr(left Node, minPrec int) Node {
 
 		p.nextToken() // consume operator
 		right := p.parseBinaryExpr(nil, precedence(op)+1)
+		// A binary operator with no parseable right operand (e.g. `234 % & **`,
+		// or a dangling `a +` at end of input) used to build a BinaryExpr with
+		// a nil operand; codegen then fabricated make_int(0) for the missing
+		// side, so the malformed expression silently compiled. Require a real
+		// right operand and report it when absent.
+		if right == nil {
+			p.addError(fmt.Sprintf("expected expression after '%s' operator", op))
+		}
 		left = p.arena.AllocBinaryExpr(left, op, right)
 	}
 
@@ -1443,16 +1497,25 @@ func (p *Parser) parseUnary() Node {
 	if p.curToken.Type == lexer.TokenMinus {
 		p.nextToken() // consume '-'
 		operand := p.parseUnary()
+		if operand == nil {
+			p.addError("expected expression after unary '-'")
+		}
 		return p.arena.AllocUnaryExpr("-", operand)
 	}
 	if p.curToken.Type == lexer.TokenNot {
 		p.nextToken() // consume '!'
 		operand := p.parseUnary()
+		if operand == nil {
+			p.addError("expected expression after unary '!'")
+		}
 		return p.arena.AllocUnaryExpr("!", operand)
 	}
 	if p.curToken.Type == lexer.TokenStar {
 		p.nextToken() // consume '*'
 		operand := p.parseUnary()
+		if operand == nil {
+			p.addError("expected expression after '*' (dereference)")
+		}
 		return &Dereference{Operand: operand}
 	}
 	return p.parsePrimaryExpr()
@@ -1580,8 +1643,17 @@ func (p *Parser) parsePrimaryExpr() Node {
 				}
 				return &AtomicOp{Op: atomicOp, Args: args, Order: order}
 			}
+			// '@' followed by an identifier that is neither a simd_ nor an
+			// atomic_ builtin (e.g. `x @ 2`, `@@@`). Returning nil here used to
+			// drop the '@' and everything after it silently, so the program
+			// compiled as if the '@' were absent — a silent miscompilation
+			// (`let x = 1 @ 2` became `let x = 1`). Report it instead.
+			p.addError(fmt.Sprintf("unexpected token '@%s' in expression position (expected @raw, @simd_*, or @atomic_*)", op))
 			return nil
 		}
+		// '@' not followed by 'raw' or an identifier (e.g. a bare `@@@`).
+		// Same silent-drop hazard: emit a diagnostic rather than discarding.
+		p.addError("unexpected token '@' in expression position (expected @raw, @simd_*, or @atomic_*)")
 		return nil
 	case lexer.TokenAlloc:
 		return p.parseAlloc()
@@ -1627,6 +1699,13 @@ func (p *Parser) parsePrimaryExpr() Node {
 			p.nextToken()
 		} else {
 			operand = p.parsePrimaryExpr()
+		}
+		// A borrow with no operand (e.g. `let x = &` or the `&` inside
+		// `234 % & **`) used to build a BorrowExpr with a nil operand that
+		// codegen turned into make_int(0), silently compiling the malformed
+		// expression. Require a real operand.
+		if operand == nil {
+			p.addError("expected expression after '&' (borrow)")
 		}
 		return &BorrowExpr{Operand: operand, Mutable: mutable}
 	case lexer.TokenMove:
