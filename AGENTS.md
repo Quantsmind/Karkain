@@ -3328,6 +3328,99 @@ native target table with real per-target ownership, and `installation.rst`
 states Go is reference-only **for those targets**, not globally (the Go
 toolchain is still needed to build the compiler itself).
 
+Also completed: **A1 - kcc owns `native-x86_64-linux`** (increment 151,
+slice A1; verdict **COMPLETE** for the emission, with execution evidence
+stated separately and NOT claimed on this host). 151D gave the self-hosted
+engine the Windows PE target for a real user program and left ELF and
+Mach-O refusing with K116. A1 wires the **SAME** whole-program driver to
+the Linux target, so there is exactly one copy of the scan/plan/lower
+sequence and the two targets cannot disagree about a program's frame, its
+rodata interning, or its refusals. **Driver** (`src/compiler/native_value.kark`):
+`natNativeProgram(ast)` becomes a one-line wrapper over the new
+`natNativeProgramOS(ast, isWin)` -- deliberately a wrapper rather than a
+second driver, so `karkain native-ast` and every frozen Step 9c-9h gate
+keep driving exactly the code they were gated against. `isWin` is the only
+OS-dependent input: the entry stub (`natWinStub`'s PEB bootstrap vs
+`natStartStub`'s `_start` + raw `write` syscall), the frame's 16-byte
+alignment rule, and the stdout write shape. The diff is five lines: three
+literal `1`s become `isWin`, the stub is chosen by the same flag, and the
+PE-link return becomes a branch. **The CONTAINER is deliberately NOT a
+parameter**, and the reason is the substantive finding of the slice: PE
+resolves its patches *inside* `natPELink`, because the loader rebases a
+`DYNAMIC_BASE` image and each absolute slot needs a DIR64 entry as well as
+a value -- Step 9b shipped the missing-entry defect, a structurally valid
+PE that printed its digits and silently lost its newline. ELF is non-PIE:
+no relocation entry exists at all, so the values are baked in place
+*BEFORE* linking. `natNativeLinkLinux` does that with the oracle's own
+arithmetic read from `pkg/native/program.go:1650-1683` rather than
+re-derived: `roBase = BaseAddr + textOff + len(text)`,
+`heapBase = BaseAddr + alignUp(bodyEnd, 0x1000)`, with `textOff` derived
+from the arena's presence because ELF's program-header COUNT depends on it
+(64+56 = 120 heapless, 64+112 = 176 with an arena). `natResolveArena`
+mirrors `natResolveRodata` for the heap patch list (emitter slots 13/14) as
+a **separate function**, because threading the slot difference through one
+routine is how the two lists get crossed. Calling `natPELink` for Linux
+would not fail loudly -- it would produce a PE under a Linux target NAME,
+which is a miscompile rather than a limitation. **Seam**
+(`pkg/cli/kcc_native.go`): Linux joins `kccNativeOwnedTargets`; macOS
+deliberately does NOT, and `kccNativeValidateImage` has **no macOS branch**,
+so a future target added without a validator fails loudly instead of
+shipping unvalidated bytes. Three OS hardcodes were de-hardcoded through
+the existing `NativeTargetOS`: `nativeImageExt`, `nativeHostCanRun`, and
+the container validator (ParsePE vs Parse). **Gate**
+`pkg/cli/phase151d_elfnative_test.go` **6 tests / 16 subtests PASS**: the
+image is validated by the **ORACLE's** `native.Parse`, never by a check
+written in the gate (a structural check there would share the assumptions
+of the code under test); the entry is pinned to `BaseAddr + textOff`,
+which is exact because `natStartStub` marks `_start` first, with the arena
+case included so the header-count rule is covered on **both** sides rather
+than only the easy one; the Windows path is re-checked because A1 touched
+shared code and the PE is the target that carries execution evidence, so a
+regression there would be quiet; a refusal table pins the programs the
+driver does NOT lower, each asserting **no image is written**; and macOS is
+asserted to still refuse **with provenance**, which is the honest path and
+the one nobody otherwise exercises. `print(-7)` was measured refused
+identically on both targets, so it is listed as a refusal rather than
+quietly omitted from the corpus -- a gate that silently drops a case is how
+a corpus stops being evidence. **WHAT IS NOT CLAIMED, stated once:
+EXECUTION on this host.** This is windows/amd64 with no WSL and no Docker,
+so no ELF produced in this gate is run; every host-side claim is
+structural, and the Linux CI leg is where execution evidence comes from
+(the same arrangement increment 150 uses for its ELF goldens).
+**BYTE-IDENTITY with the Go oracle is also not claimed**: Step 9d already
+MEASURED a frame-padding delta between the two engines (kcc rounds the
+locals region up to 16, the oracle rounds strictly greater, so the oracle's
+frame is 16 bytes larger whenever the locals region is already aligned),
+which makes a user-program image legitimately differ in size (measured:
+kcc 312 bytes vs Go 351 for `print(42)`). Asserting equality would be
+asserting a bug, so `TestPhase151_HarnessDetectsNonParity` now asserts the
+**anti-fallback invariant** -- a valid, provenance-bearing container whose
+bytes came from kcc -- instead of a SHA comparison that could only ever
+produce a false red. Three gates that asserted "Linux refuses" were
+updated to follow the ownership **data** rather than inline target
+comparisons, which is what stops the two copies drifting again. KIR pin
+13637 -> **13674**, measured twice with `karkain kir --verify`, never
+predicted. Gates green: A1 6/6; the whole
+151/151A/151B/151C/151D/151P0/152 family (1222s); `KIRPinHolds` (454s);
+Phase 122 `KIRContinuity` (1191s); Phase 99 self-hosted parse + typecheck
+(937s); `pkg/native`, parser, sema, lexer, codegen; `go build ./...` and
+`go vet ./pkg/... ./cmd/...`. CI gains a dedicated step *Run Phase A1 kcc
+native Linux ELF gate* rather than relying on the broad 151 step, for the
+reason this repository has four times been bitten by a gate that only ran
+incidentally. **Two harness traps hit and recorded, both of which read as
+compiler defects:** (1) the gate was first named `phase151d_linux_test.go`,
+and Go's implicit build constraint read the `_linux` suffix as GOOS=linux
+and filed the file under `IgnoredGoFiles` on this host -- so the tests were
+silently not compiled, `go vet` passed, `go test -c` succeeded, and only
+`go list` revealed it. This is the same class Phase 108 documented for
+`*_wasm_test.go`; the file is now `phase151d_elfnative_test.go`. (2) The
+first fixture run reported three "unexpected token at top level" errors,
+which is PowerShell's `Set-Content -Encoding UTF8` BOM -- a trap this
+project has hit repeatedly. Both produced *convincing* compiler errors from
+non-compiler causes, which is the strongest argument for checking
+`IgnoredGoFiles` and fixture bytes before debugging an emitter.
+
+
 Also completed: **B2 seed-closure discovery job + the v1.2.0 scope amendment**
 (verdict **COMPLETE** as a change; **B2 itself remains OPEN and unproven** --
 the job is DISCOVERY, not a release gate). Two things landed. (1) A new
