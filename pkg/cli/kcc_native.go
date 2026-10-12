@@ -64,28 +64,30 @@ import (
 // kccOwnsNativeTargets reports whether the self-hosted engine emits C-free
 // native images.
 //
-// Phase 151D: TRUE, but for ONE target. kcc emits a real user program only as
-// native-x86_64-windows, through natNativeProgram -- the same driver
-// `karkain native-ast` drives and the 9c/9e/9f/9g/9h gates prove. kcc has no
-// ELF or Mach-O emitter for a user program, so those two targets are refused by
-// kcc with K116 and remain Go-backend-only. The name says "targets" plural
-// because the seam is target-scoped, but the evidence is single-target: do not
-// read this constant as a claim about all three.
+// Phase 151D: TRUE for native-x86_64-windows, through natNativeProgramOS(ast,1)
+// — the same driver `karkain native-ast` drives and the 9c/9e/9f/9g/9h gates
+// prove. Phase A1: ALSO TRUE for native-x86_64-linux through the same driver
+// with isWin=0. kcc still has no Mach-O emitter for a user program, so that one
+// target keeps refusing with K116 and is Go-backend-only. Do not read this
+// constant as a claim about all three; kccNativeOwnedTargets is the per-target
+// truth.
 const kccOwnsNativeTargets = true
 
 // kccNativeOwnedTargets lists the C-free targets kcc can emit for a real user
-// program. Phase 151D: Windows ONLY, through natNativeProgram — the driver
-// `karkain native-ast` drives and the 9c/9e/9f/9g/9h gates prove.
+// program. Phase 151D: Windows via natNativeProgramOS(ast, 1) — the driver
+// `karkain native-ast` drives and the 9c/9e/9f/9g/9h gates prove. Phase A1 adds
+// Linux via the SAME driver with isWin=0, so the scan/plan/lower sequence and
+// every refusal are shared and cannot drift between the two targets.
 //
-// kcc has no ELF or Mach-O emitter for a user program: native_elf.kark and
-// native_macho.kark lower the FIXED reference corpora that 151C/151C2 compare
-// against the Go oracle, and neither takes a program. Those two targets
-// therefore keep refusing with K116 and remain Go-backend-only.
+// kcc still has no Mach-O emitter for a user program: native_macho.kark lowers
+// the FIXED reference corpus that 151C2 compares against the Go oracle, and it
+// does not take a program. That target therefore keeps refusing with K116 and
+// remains Go-backend-only.
 //
 // This is a named list rather than an inline target comparison so the ownership
 // claim is data the gate can assert on directly, instead of being re-derived
 // from each dispatch site where the two copies could drift apart.
-var kccNativeOwnedTargets = []string{NativeWindowsTarget}
+var kccNativeOwnedTargets = []string{NativeWindowsTarget, NativeLinuxTarget}
 
 // kccNativeOwns reports whether kcc emits targetName. False means kcc must
 // refuse it — never fall back to the Go engine for it.
@@ -138,15 +140,21 @@ func KCCNativeRunCommand(targetFile string, cfg codegen.Config, verbose bool) Co
 	if target == "" {
 		target = NativeLinuxTarget
 	}
+	// The OS follows from the target, so the run/refusal contract is the Go
+	// backend's Phase-111 one for both owned targets rather than a second rule.
+	targetOS := NativeTargetOS(target)
+	if targetOS == "" {
+		return kccNativeConsult(targetFile, target, true)
+	}
 	// A cross-run needs an emulator. The refusal names the fix, matching the
 	// Go backend's Phase-111 contract rather than inventing a second one.
-	if !nativeHostCanRun(native.OSWindows) {
+	if !nativeHostCanRun(targetOS) {
 		return CommandResult{ExitCode: ExitEnv, Message: fmt.Sprintf(
 			"cannot run a %s binary on %s/%s: cross-run requires an emulator or a remote target; use `karkain build --target %s -o <path>` to build only",
 			target, runtime.GOOS, runtime.GOARCH, target)}
 	}
 
-	tmp, err := os.CreateTemp("", "karkain-kcc-native-*"+nativeImageExt(native.OSWindows))
+	tmp, err := os.CreateTemp("", "karkain-kcc-native-*"+nativeImageExt(targetOS))
 	if err != nil {
 		return CommandResult{ExitCode: ExitFailure, Message: fmt.Sprintf("temp file: %v", err)}
 	}
@@ -346,12 +354,32 @@ func kccNativeAcceptOutput(out, target string) ([]byte, *CommandResult) {
 	}
 	// Structural validation with the ORACLE's own parser, so a kcc that emits
 	// well-formed hex but a broken container is caught here rather than by the
-	// user's loader.
-	if _, _, err := native.ParsePE(img); err != nil {
+	// user's loader. The parser is chosen by the target's OS: ParsePE for
+	// Windows, Parse for ELF. They are different containers, so a single
+	// "validate" call would either reject a correct image or accept a wrong one.
+	if verr := kccNativeValidateImage(img, target); verr != nil {
 		return nil, &CommandResult{ExitCode: ExitCompile, Message: fmt.Sprintf(
-			"the self-hosted engine emitted a structurally invalid image for --target %s: %v", target, err)}
+			"the self-hosted engine emitted a structurally invalid image for --target %s: %v", target, verr)}
 	}
 	return img, nil
+}
+
+// kccNativeValidateImage runs the ORACLE's container validator for the target's
+// OS: ParsePE for Windows, Parse for ELF. Validating an ELF with the PE parser
+// (or the reverse) would REJECT a correct image rather than accept a wrong one,
+// so a future target added without a matching validator fails loudly here
+// instead of silently shipping unvalidated bytes.
+func kccNativeValidateImage(img []byte, target string) error {
+	switch NativeTargetOS(target) {
+	case native.OSWindows:
+		_, _, err := native.ParsePE(img)
+		return err
+	case native.OSLinux:
+		_, _, err := native.Parse(img)
+		return err
+	default:
+		return fmt.Errorf("no structural validator is registered for --target %s", target)
+	}
 }
 
 // kccNativeHexFromOutput pulls the image hex out of kcc's answer.
@@ -392,7 +420,14 @@ func kccNativeOutputPath(targetFile, outputPath, target string) (string, error) 
 	if err := os.MkdirAll(buildDir, 0o755); err != nil {
 		return "", fmt.Errorf("create build dir: %v", err)
 	}
-	return filepath.Join(buildDir, filepath.Base(base)+nativeImageExt(native.OSWindows)), nil
+	// The extension follows the target's OS, so a Linux build lands as .elf and
+	// a Windows one as .exe -- the same placement the Go backend uses, which
+	// keeps `--target` the only visible difference between the two engines.
+	targetOS := NativeTargetOS(target)
+	if targetOS == "" {
+		return "", fmt.Errorf("no native image extension is registered for --target %s", target)
+	}
+	return filepath.Join(buildDir, filepath.Base(base)+nativeImageExt(targetOS)), nil
 }
 
 // kccNativeConsult stages the real project for the self-hosted engine, runs kcc
