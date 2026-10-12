@@ -409,8 +409,16 @@ func (p *Parser) parseFunc() *FuncDecl {
 	// is properly aligned. Without this skip, the return type was treated as
 	// the body opener and the closing brace was left dangling, which swallowed
 	// every following top-level statement into the still-open body.
-	if p.curToken.Type == lexer.TokenIdent || p.curToken.Type == lexer.TokenFn {
-		p.nextToken() // consume the return type (incl. Phase 133 `fn`)
+	//
+	// The type keywords (`bool`, `int`, `float64`, `string`, `bigint`,
+	// `bigfloat`) lex as keyword tokens rather than identifiers, so they need
+	// explicit branches or the keyword is left in place, the '{' is taken as
+	// the return type, and the body parse derails with "expected '}' to close
+	// function body".
+	switch p.curToken.Type {
+	case lexer.TokenIdent, lexer.TokenFn, lexer.TokenBool, lexer.TokenInt,
+		lexer.TokenFloat64, lexer.TokenString, lexer.TokenBigInt, lexer.TokenBigFloat:
+		p.nextToken() // consume the return type (incl. Phase 133 `fn` and the type keywords)
 	}
 	p.nextToken() // consume '{'
 
@@ -548,7 +556,22 @@ func (p *Parser) parseVarDecl() *VarDeclStmt {
 		align = p.tryParseAlignAttr()
 	}
 
-	p.nextToken() // consume '='
+	// The grammar has no declaration-without-initializer form: every `let`,
+	// `var` and `const` binding is followed by '=' and an expression. This
+	// consumed one token unconditionally, assuming it was '=', so `let x`
+	// followed by `print(1);` consumed the `print` keyword AS the '=' and then
+	// parsed `(1)` as the initializer: the entire print statement vanished and
+	// the program built with a wrong body. Verify the token before consuming
+	// it, and on failure leave it in place so recovery still sees the real
+	// following statement.
+	if p.curToken.Type == lexer.TokenAssign {
+		p.nextToken() // consume '='
+	} else {
+		p.addError(fmt.Sprintf("expected '=' after '%s %s'", kwLit, name))
+		node := &VarDeclStmt{Name: name, Const: isConst, Align: align, Col: nameCol, EndCol: nameEndCol}
+		setNodeLine(node, line)
+		return node
+	}
 
 	// Check if the value is a matrix declaration
 	if p.curToken.Type == lexer.TokenMatrix {
@@ -580,6 +603,14 @@ func (p *Parser) parseVarDecl() *VarDeclStmt {
 	}
 
 	val := p.parseExpr()
+	// A declaration whose '=' is present but whose initializer is missing
+	// (`let x =`, or `let x =` at end of input) left Value nil and codegen
+	// fabricated make_int(0), so the binding silently became 0. The parse
+	// error already stops the pipeline before codegen; this makes the cause
+	// explicit instead of leaving it to be discovered as a wrong value.
+	if val == nil {
+		p.addError(fmt.Sprintf("expected expression after '=' in '%s %s'", kwLit, name))
+	}
 
 	// If we have a type, store it in the variable declaration
 	if typeName != "" {
@@ -688,6 +719,13 @@ func (p *Parser) parsePrint() *PrintStmt {
 		}
 	} else if p.curToken.Type == lexer.TokenRParen {
 		p.nextToken() // consume ')'
+	}
+	// `print` takes exactly one value; a space-form or paren-form print whose
+	// operand is absent used to build a PrintStmt with a nil value, and codegen
+	// fabricated make_int(0) for it, so `print()` silently printed 0. The
+	// operand is required by the grammar and by every documented use.
+	if val == nil {
+		p.addError("print requires an expression")
 	}
 	node := &PrintStmt{Value: val}
 	setNodeLine(node, line)
@@ -1151,6 +1189,12 @@ func (p *Parser) parseIdentStatement() Node {
 		if p.curToken.Type == lexer.TokenAssign {
 			p.nextToken() // consume '='
 			val := p.parseExpr()
+			// Same nil-operand guard as the other assignment paths: a nil
+			// Right becomes make_int(0) in codegen, so `arr[i] =` silently
+			// stored 0.
+			if val == nil {
+				p.addError("expected expression after '=' operator")
+			}
 			return p.exprStmtAt(&BinaryExpr{Left: target, Operator: "=", Right: val, Line: line}, line)
 		}
 		return p.exprStmtAt(target, line)
@@ -1160,6 +1204,12 @@ func (p *Parser) parseIdentStatement() Node {
 	if p.curToken.Type == lexer.TokenAssign {
 		p.nextToken() // consume '='
 		val := p.parseExpr()
+		// A dangling `x =` in statement position built a BinaryExpr with a nil
+		// right side, and codegen fabricated make_int(0) for it, so the
+		// statement silently assigned 0 and the program built.
+		if val == nil {
+			p.addError("expected expression after '=' operator")
+		}
 		assignExpr := &BinaryExpr{
 			Left:     &Identifier{Name: ident, Line: line, Col: identCol, EndCol: identCol + len(ident)},
 			Operator: "=",
@@ -1424,6 +1474,14 @@ func (p *Parser) parseBinaryExpr(left Node, minPrec int) Node {
 		if p.curToken.Type == lexer.TokenAssign && minPrec == 0 && left != nil {
 			p.nextToken() // consume '='
 			right := p.parseExpr()
+			// An assignment with no parseable right operand (a dangling `x =`,
+			// or `x =` at end of input) used to build a BinaryExpr with a nil
+			// right side; codegen then fabricated make_int(0), so `x =` silently
+			// assigned 0 and the program built. This is the same defect the
+			// binary-operator guard fixes, on the path that guard missed.
+			if right == nil {
+				p.addError("expected expression after '=' operator")
+			}
 			left = p.arena.AllocBinaryExpr(left, "=", right)
 			continue
 		}
