@@ -20,12 +20,19 @@ func multierrorPath(t *testing.T, name string) string {
 // multierr.kark fixture must surface: every one is a genuine, independent
 // top-level or expression-shape error at its own line, none cascades, none is
 // duplicated, and none is fabricated by the checker.
+//
+// The `return c + )` line carries TWO independent defects and therefore two
+// diagnostics: the '+' has no right operand, and a stray ')' follows. The
+// parser now reports both (previously the missing operand was silently
+// recovered as make_int(0) and only the stray ')' was reported), so the set
+// below includes the operand diagnostic the correctness fix added.
 var expectedSyntaxErrorLines = []string{
 	"expected '@target(...)' attribute, got '@bad_attr_a'",
 	"expected '@target(...)' attribute, got '@bad_attr_b'",
 	"expected '@target(...)' attribute, got '@bad_attr_c'",
 	"unexpected token '1' after 'public' modifier (expected func/type/enum)",
 	"unexpected token '2' after 'public' modifier (expected func/type/enum)",
+	"expected expression after '+' operator",
 	"unexpected token ')' ())",
 }
 
