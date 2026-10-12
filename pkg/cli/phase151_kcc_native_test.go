@@ -82,8 +82,14 @@ func TestPhase151_NoSilentGoFallback(t *testing.T) {
 					tgt, kccNativeProvenance, res.Output)
 			}
 
-			if tgt == NativeWindowsTarget {
-				assertKccOwnedWindowsBuild(t, res, tgt)
+			// Phase A1 widened ownership from Windows to Windows + Linux, so
+			// this branch is driven by the OWNERSHIP DATA rather than by an
+			// inline target comparison. Keying it on kccNativeOwns is what keeps
+			// the two copies from drifting: a third owned target would be
+			// asserted here automatically instead of silently falling through
+			// to the refusal branch and failing.
+			if kccNativeOwns(tgt) {
+				assertKccOwnedBuild(t, res, tgt)
 				return
 			}
 
@@ -92,12 +98,19 @@ func TestPhase151_NoSilentGoFallback(t *testing.T) {
 	}
 }
 
-// assertKccOwnedWindowsBuild is the 151D positive half: kcc owns this target, so
-// it must emit, and the emission must be attributable to kcc.
-func assertKccOwnedWindowsBuild(t *testing.T, res nativeBuildResult, tgt string) {
+// assertKccOwnedBuild is the positive half: kcc owns this target, so it must
+// emit, and the emission must be attributable to kcc.
+//
+// Phase A1 renamed this from assertKccOwnedWindowsBuild and made the container
+// check follow the target's OS rather than being hardcoded to PE. Hardcoding it
+// is the trap the rename exists to prevent: a Linux image validated with
+// ParsePE would FAIL, so the function would either stop working for Linux or
+// someone would eventually weaken it to "try PE, else skip", which is the
+// self-defeating assertion this project keeps rejecting.
+func assertKccOwnedBuild(t *testing.T, res nativeBuildResult, tgt string) {
 	t.Helper()
 	if !res.WroteImage {
-		t.Fatalf("%s: kcc owns this target in 151D but wrote no image: %s", tgt, res.Output)
+		t.Fatalf("%s: kcc owns this target but wrote no image: %s", tgt, res.Output)
 	}
 	if res.ExitCode != 0 {
 		t.Errorf("%s: kcc native build exited %d: %s", tgt, res.ExitCode, res.Output)
@@ -112,9 +125,10 @@ func assertKccOwnedWindowsBuild(t *testing.T, res nativeBuildResult, tgt string)
 	if strings.Contains(res.Output, "[native-") {
 		t.Errorf("%s: output still carries a Go native build banner: %s", tgt, res.Output)
 	}
-	// And the bytes must be a real container, not hex that happened to decode.
-	if _, _, err := native.ParsePE(res.Image); err != nil {
-		t.Errorf("%s: the kcc-emitted image is not a structurally valid PE: %v", tgt, err)
+	// And the bytes must be a real container for THIS target's OS, not hex that
+	// happened to decode.
+	if err := kccNativeValidateImage(res.Image, tgt); err != nil {
+		t.Errorf("%s: the kcc-emitted image is not a structurally valid container: %v", tgt, err)
 	}
 }
 
@@ -322,18 +336,26 @@ func TestPhase151_KccNativeRefusalIsNotAFallback(t *testing.T) {
 			"the flag was supposed to be inverted in the same change that wires it")
 	}
 
-	// Exactly the target kcc can emit. Claiming more would be a lie this gate
-	// cannot detect at runtime, because an unsupported target is refused by
-	// kcc and the user sees a plausible-looking error.
-	if !kccNativeOwns(NativeWindowsTarget) {
-		t.Fatal("kccOwnsNativeTargets is true but the owned-target list omits Windows: " +
-			"the flag claims ownership the data does not support")
+	// Exactly the targets kcc can emit. Phase A1 added Linux through the same
+	// driver, so the assertion moves with the data rather than staying pinned to
+	// the 151D single-target list -- which is precisely how it drifted once
+	// already.
+	for _, tgt := range []string{NativeWindowsTarget, NativeLinuxTarget} {
+		if !kccNativeOwns(tgt) {
+			t.Errorf("%s is NOT listed as kcc-owned, but kcc emits it: the flag claims "+
+				"less than the data supports, and the target would fall through to a refusal "+
+				"the engine could have answered", tgt)
+		}
 	}
-	for _, tgt := range []string{NativeLinuxTarget, NativeMacOSTarget} {
+	// macOS is the one target that must NOT be claimed: kcc has no Mach-O
+	// emitter for a user program (native_macho.kark lowers a fixed reference
+	// corpus only). Claiming it would turn a refusal into a false success, and
+	// the runtime cannot detect the difference -- the user would just see a
+	// plausible-looking error for a target the engine could have handled.
+	for _, tgt := range []string{NativeMacOSTarget} {
 		if kccNativeOwns(tgt) {
-			t.Errorf("%s is listed as kcc-owned, but kcc has no ELF/Mach-O emitter for a "+
-				"user program (native_elf.kark/native_macho.kark lower fixed reference "+
-				"corpora only). Claiming it would turn a refusal into a false success", tgt)
+			t.Errorf("%s is listed as kcc-owned, but kcc has no Mach-O emitter for a "+
+				"user program. Claiming it would turn a refusal into a false success", tgt)
 		}
 	}
 }

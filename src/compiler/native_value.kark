@@ -4463,7 +4463,41 @@ s = natCallPrintInt(s)
 // print_int's own two, in first-use order. That is a property of the supported
 // subset rather than an assumption about a particular program: a construct that
 // would introduce another string is refused during the scan, before any emission.
+// natNativeProgram compiles a PARSED PROGRAM to a native PE image. It is the
+// Windows-only entry point and is retained so `karkain native-ast` and every
+// frozen 151A Step 9c-9h gate keep driving exactly the code they were gated
+// against. Phase A1 adds the Linux container behind natNativeProgramOS, which
+// shares this whole body; `natNativeProgram` is now a one-line wrapper naming
+// the Windows target rather than a second copy of the driver.
 func natNativeProgram(ast) {
+    return natNativeProgramOS(ast, 1)
+}
+
+// natNativeProgramOS compiles a PARSED PROGRAM to a native image for one OS.
+//
+// isWin selects the OS, and it is the ONLY OS-dependent input: the entry stub,
+// the frame's 16-byte alignment rule, the stdout write shape, and the container
+// writer all follow from it. That is the whole reason this is a parameter rather
+// than a second driver -- there is exactly one copy of the scan/plan/lower
+// sequence, so the two targets cannot disagree about a program's frame, its
+// rodata interning or its refusals.
+//
+// The two container paths differ in a way that is NOT a parameter, and the
+// difference is load-bearing:
+//
+//   - PE resolves its patches INSIDE the linker (natPELink), because Windows
+//     rebases the image and each absolute slot needs a DIR64 relocation entry as
+//     well as a value. Getting that wrong produced a valid PE whose print lost
+//     its newline (Step 9b).
+//   - ELF is non-PIE, so the values are baked in place BEFORE linking and no
+//     relocation entry exists at all. So the ELF arm resolves rodata and the
+//     arena here, with the base arithmetic the oracle uses at
+//     pkg/native/program.go:1650-1683.
+//
+// Calling natPELink for Linux (or vice versa) would not fail loudly; it would
+// produce a PE under a Linux target NAME. That is a miscompile, so the container
+// choice is made once, here, by the same isWin that chose the stub.
+func natNativeProgramOS(ast, isWin) {
     let stmts = ast[1]
     let mainFn = natNativeFindMain(stmts)
     if (mainFn == 0) {
@@ -4487,7 +4521,7 @@ func natNativeProgram(ast) {
     // element area. All three agree with the oracle's scanLets for the same program.
     let usesStr = 0
     if (natNativeConcatSites(body) > 0) { usesStr = 1 }
-    let lay = natFrameLayout(natNativePlanBytes(plan), 0, usesStr, 0, 0, 1)
+    let lay = natFrameLayout(natNativePlanBytes(plan), 0, usesStr, 0, 0, isWin)
     let frame = lay[6]
     let strTemp = lay[2]
 
@@ -4496,7 +4530,16 @@ func natNativeProgram(ast) {
     // is entry 2+k. It is computed BEFORE emission because the body needs those offsets
     // to record its rodata references, and computing them after would mean recording a
     // placeholder the linker had no way to fill.
-    let s = natWinStub()
+    // The entry stub is OS-specific and nothing else is: both stubs Mark `_start`
+    // first and Mark `karkain_main` last, so every label displacement the body and
+    // the helpers encode is identical between them. That is what lets ONE driver
+    // serve both targets.
+    let s = natNewEmitter(0)
+    if (isWin == 1) {
+        s = natWinStub()
+    } else {
+        s = natStartStub()
+    }
     s = natSubRegImm32(s, natRegRSP(), frame)
     s = natNativeLower(s, body, plan, ro[1], strTemp, tbl)
     // The implicit `return 0` is emitted ONLY when the program has no explicit
@@ -4514,14 +4557,18 @@ func natNativeProgram(ast) {
     }
     s = natAddRegImm32(s, natRegRSP(), frame)
     s = natRet(s)
-    s = natPrintIntBody(s, 1, 0, 1)
+    // winWrite selects the stdout write SHAPE, not the destination: 1 is the Win64
+    // GetStdHandle/WriteFile pair through the IAT that the entry bootstrap
+    // published, 0 is the raw Linux `write` syscall (natSysWrite = 1 on
+    // linux/amd64). Both write fd 1 to stdout; only the mechanism is OS-specific.
+    s = natPrintIntBody(s, isWin, 0, 1)
     // print_str, in the SAME state and only when the program can produce a string.
     //
     // The gating is what keeps every string-free image byte-identical: an unused helper
     // costs bytes and nothing else, but print_int is emitted unconditionally today, so
     // the honest comparison is against today's behaviour rather than an ideal.
     if (natNativeUsesString(body)) {
-        s = natPrintStrBody(s, 1, 1)
+        s = natPrintStrBody(s, isWin, 1)
     }
     // The arena and its allocator, ONLY when the program concatenates. It is emitted
     // AFTER the body because the body CALLS it; a forward call would patch to a
@@ -4546,7 +4593,84 @@ func natNativeProgram(ast) {
     let heap = []
     if (arenaLen > 0) { heap = natNativeArenaBytes0(arenaLen) }
     let hp = natFlatPairs(natStHeapPos(s), natStHeapOff(s))
-    return ["", natPELink(text, ro[0], heap, rp, ip, ap, hp, natPETextOff(), natPETextOff())]
+
+    if (isWin == 1) {
+        return ["", natPELink(text, ro[0], heap, rp, ip, ap, hp, natPETextOff(), natPETextOff())]
+    }
+    return ["", natNativeLinkLinux(s, text, ro[0], heap)]
+}
+
+// natNativeLinkLinux resolves the non-PIE ELF's absolute addresses and links the
+// image. It is the ELF counterpart of the natPELink call above, and the two
+// differ in WHERE the patches are applied:
+//
+//   - PE: natPELink writes each immediate AND adds a DIR64 relocation entry,
+//     because a PE carrying DYNAMIC_BASE is rebased by the loader and a baked
+//     absolute is stale. Step 9b shipped the missing-entry defect: a structurally
+//     valid PE that printed its digits and silently lost its newline.
+//   - ELF: ET_EXEC at a fixed base, never rebased, so no relocation entry exists
+//     and the value is simply written where it belongs.
+//
+// The arithmetic below is the oracle's, read from pkg/native/program.go:1650-1683
+// rather than re-derived:
+//
+//	roBase   = BaseAddr + textOff + len(text)
+//	heapBase = BaseAddr + alignUp(bodyEnd, 0x1000)
+//	bodyEnd  = textOff + len(text) + len(rodata)
+//
+// textOff depends on whether a data segment follows, because ELF's program
+// header COUNT does: one PT_LOAD for a heapless program, two for one with an
+// arena. That is the same rule natELFLink enforces, so the two are computed from
+// one expression rather than restated.
+func natNativeLinkLinux(s, text, rodata, heap) {
+    let phnum = 1
+    if (len(heap) > 0) { phnum = 2 }
+    let textOff = natEhSize() + natPhSize() * phnum
+    // The rodata sites are resolved first because natResolveRodata writes into
+    // the emitter's own byte buffer in place; the heap sites then need the SAME
+    // buffer, so both must run before natFinish copies it out.
+    natResolveRodata(s, natBaseAddr(), textOff + len(text))
+    let bodyEnd = textOff + len(text) + len(rodata)
+    let heapBase = natBaseAddr() + natAlignUp(bodyEnd, natPage())
+    natResolveArena(s, heapBase)
+    // natELFLink returns a diagnostic STRING on its one failure condition -- a
+    // textOffset it does not expect -- and a byte array otherwise. That refusal
+    // is unreachable here by construction rather than by a runtime type test:
+    // textOff above is computed from natEhSize() + natPhSize()*phnum with
+    // phnum derived from len(heap), which is exactly the expression
+    // natELFLink validates against, so the two agree by arithmetic and not by
+    // coincidence. It is stated because Step 9b shipped the mistake of handing a
+    // linker error STRING back as if it were an image.
+    return natELFLink(text, rodata, heap, textOff, textOff)
+}
+
+// natResolveArena writes the arena's absolute addresses into the emitted bytes,
+// mirroring natResolveRodata for the heap patch list (emitter slots 13/14).
+//
+// It is a separate function rather than a shared one with a kind parameter
+// because the two lists are flat [pos, off] pairs in DIFFERENT emitter slots,
+// and threading that difference through one routine would mean passing both slot
+// numbers into it -- which is how the two lists get crossed.
+func natResolveArena(s, base) {
+    let n = 0
+    let i = 0
+    while (i < len(s[13])) {
+        let pos = s[13][i]
+        let off = s[14][i]
+        let av = base + off
+        let code = natStCode(s)
+        code[pos] = av & 255
+        code[pos + 1] = (av >> 8) & 255
+        code[pos + 2] = (av >> 16) & 255
+        code[pos + 3] = (av >> 24) & 255
+        code[pos + 4] = (av >> 32) & 255
+        code[pos + 5] = (av >> 40) & 255
+        code[pos + 6] = (av >> 48) & 255
+        code[pos + 7] = (av >> 56) & 255
+        n = n + 1
+        i = i + 1
+    }
+    return n
 }
 
 // ============================================================

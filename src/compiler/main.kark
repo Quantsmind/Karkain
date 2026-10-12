@@ -626,28 +626,37 @@ func buildNativeFile(path, target) {
       // fallback, so it is load-bearing and must stay greppable.
       print("[kcc] native request " + target + " (os=" + nativeTargetOS(target) + "): " + fileBaseName(path))
 
-      // Phase 151D: kcc now OWNS the Windows PE target for a real program.
+      // Phase 151D + A1: kcc OWNS the Windows PE target AND the Linux ELF target
+      // for a real program.
       //
-      // The emitter below is not new code. It is natNativeProgram, the same
+      // The emitter is not new code. It is natNativeProgram, the same
       // whole-program driver that `karkain native-ast <file.kark>` drives and
       // that the 9c/9e/9f/9g/9h gates execute on Windows and structurally
-      // check on Linux. What changed is that it is wired to the user-facing
-      // `--target native-x86_64-windows` instead of living only behind a
-      // measurement subcommand.
+      // check on Linux. What changed in 151D is that it is wired to the
+      // user-facing `--target native-x86_64-windows` instead of living only
+      // behind a measurement subcommand; what A1 adds is that the SAME driver
+      // is wired to `--target native-x86_64-linux`, differing only in the OS
+      // its entry stub and container are chosen for.
       //
-      // ONLY native-x86_64-windows. kcc has no ELF or Mach-O emitter for a
-      // user program: native_elf.kark and native_macho.kark lower the FIXED
-      // reference corpora that 151C/151C2 compare against the Go oracle, and
-      // neither takes a program. So the other two targets keep refusing, and
-      // that refusal is the honest answer rather than a gap to paper over:
-      // invoking this emitter for them would silently produce a PE under a
-      // Linux or macOS target NAME, which is a miscompile, not a fallback.
+      // NOT native-x86_64-macos. kcc has no Mach-O emitter for a user program:
+      // native_macho.kark lowers the FIXED reference corpus that 151C2 compares
+      // against the Go oracle, and it does not take a program. So that target
+      // keeps refusing, and that refusal is the honest answer rather than a gap
+      // to paper over: invoking this emitter for it would silently produce a PE
+      // or an ELF under a macOS target NAME, which is a miscompile, not a
+      // fallback.
       //
       // The provenance line above is load-bearing: the Go layer must see it
       // before it will write any bytes, so an image without provenance can
       // never be presented as a kcc build.
-      if (target == "native-x86_64-windows") {
-        let nres = natNativeProgram(ast)
+      if (target == "native-x86_64-windows" || target == "native-x86_64-linux") {
+        // nwin selects the container and entry path: 1 = PE + Win64 entry/PEB
+        // bootstrap, 0 = ELF + Linux `_start` + the raw write(2) syscall. It is
+        // derived once here rather than re-tested inside the driver, so the
+        // target-name comparison exists in exactly one place per file.
+        let nwin = 0
+        if (target == "native-x86_64-windows") { nwin = 1 }
+        let nres = natNativeProgramOS(ast, nwin)
         if (nres[0] != "") {
           print(nres[0])
           return
@@ -657,9 +666,9 @@ func buildNativeFile(path, target) {
         return
       }
 
-      print("error[K116]: the self-hosted engine (kcc) emits a native image for native-x86_64-windows only, so it cannot emit --target " + target + ".")
-      print("  kcc has no ELF or Mach-O emitter for a user program: native_elf.kark and native_macho.kark")
-      print("  lower the fixed reference corpora that 151C/151C2 compare against the Go oracle, and neither takes one.")
+      print("error[K116]: the self-hosted engine (kcc) emits a native image for native-x86_64-windows and native-x86_64-linux only, so it cannot emit --target " + target + ".")
+      print("  kcc has no Mach-O emitter for a user program: native_macho.kark lowers")
+      print("  the fixed reference corpus that 151C2 compares against the Go oracle, and it does not take one.")
       print("  This is refused here, by kcc, rather than silently handed to the Go engine.")
       print("  The " + target + " C-free target is implemented by the Go backend alone.")
 }

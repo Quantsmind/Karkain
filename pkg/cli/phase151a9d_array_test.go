@@ -604,7 +604,13 @@ func TestPhase151A9D_NoGoFallback(t *testing.T) {
 		t.Fatalf("writing the test program: %v", err)
 	}
 
-	for _, tgt := range []string{NativeLinuxTarget, NativeMacOSTarget} {
+	// macOS only. Phase A1 gave kcc the Linux ELF target, so the "kcc does not
+	// own this target, therefore it must refuse" property no longer applies to
+	// Linux -- its no-fallback guarantee is now "must EMIT with provenance", and
+	// that is asserted in TestPhase151_NoSilentGoFallback (which keys on
+	// kccNativeOwns) and end-to-end in TestPhase151D_LinuxEmitsAValidELF. Listing
+	// Linux here would assert a refusal that is no longer the honest answer.
+	for _, tgt := range []string{NativeMacOSTarget} {
 		tgt := tgt
 		t.Run("refuses "+tgt, func(t *testing.T) {
 			out, err := exec.Command(karkain, "build", "--target", tgt, src).CombinedOutput()
