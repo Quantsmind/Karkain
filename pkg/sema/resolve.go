@@ -53,6 +53,10 @@ type Resolver struct {
 	// module tracking (Phase 103)
 	modules  map[string]string // module name (file basename) → source file path
 	imported map[string]bool   // declared `import <name>` names
+	// record field tables (see structcheck.go): declared field names per
+	// record type, plus declaration order so a diagnostic can list them.
+	structs map[string]map[string]bool
+	structFieldOrder map[string][]string
 }
 
 // builtinNames is the set of language/standard-library functions handled
@@ -105,6 +109,8 @@ func NewResolver(prog *parser.Program, sm SourceMap) *Resolver {
 		callerFile:  make(map[string]string),
 		modules:    make(map[string]string),
 		imported:   make(map[string]bool),
+		structs:    make(map[string]map[string]bool),
+		structFieldOrder: make(map[string][]string),
 	}
 	for _, imp := range prog.Imports {
 		r.imported[imp.Name] = true
@@ -114,6 +120,8 @@ func NewResolver(prog *parser.Program, sm SourceMap) *Resolver {
 		r.indexModules(sm)
 	}
 	r.collectDefs(prog.Statements, sm)
+	r.collectStructTypes(prog.Statements)
+	r.checkStructFields(prog.Statements)
 	if sm != nil && len(prog.Imports) > 0 {
 		r.validateImports(prog.Imports, sm)
 	}

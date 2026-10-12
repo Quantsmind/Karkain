@@ -71,6 +71,7 @@ Dependency order: `I-0 → I-1 → I-2 → I-3 → I-4 → I-5 → I-6`. I-2/I-3
 ### I-5 — Native link, gcc optional (GA-141 / post-1.1.0)
 **Do**: `x86-64` machine-code emitter + `ELF` writer first (Linux), then `PE` (Windows), modeled on `pkg/wasm/module.go+emit.go` (the proven direct-emission pattern). Reuse `NativeBuilder` (`pkg/codegen/native_builder.go+native.go`) design; calling convention + relocations + runtime ABI documented in `docs/native-codegen.md`. `c23` remains (`--target c23`), gcc required ONLY for that target.
 **Gate**: hello + `stdlib_v2` + one `net` program link with `gcc`/`clang`/`cl` ALL absent from `PATH`; cross-target deterministic errors preserved; `phase111` re-green.
+**Scope note (2026-10-10, owner-authorized)**: the `hello` half of this gate is **met** and stays in v1.2.0. The `stdlib_v2` and `net` halves are **carried over to v1.3.0 as UNMET** — the native driver lowers no function call and `pkg/native` has no socket emitter. See `docs/release/v1.2.0-CHECKLIST.md` §2.1 and §4. I-5 is therefore **not complete**, and this gate may not be reported green on the strength of `hello` alone.
 **Out**: C23 dependency gone from the default path.
 
 ### I-6 — Self-bootstrap (retire the pin)

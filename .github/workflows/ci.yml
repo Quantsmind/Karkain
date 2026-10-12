@@ -322,6 +322,12 @@ jobs:
       - name: Run Increment 152-B2 native sha256_hex gate
         run: go test ./pkg/native/ -run 'TestPhase152B2_|TestSHA256Harness_' -count=1 -timeout 20m
 
+      # Increment 154 (v1.2.0) — I-6 self-bootstrap: retires the
+      # `KARKAIN_ENGINE=go` stage-1 pin so compiler children run the default
+      # self-hosted kcc engine ("kcc builds kcc").
+      - name: Run Increment 154 self-bootstrap gate
+        run: go test ./pkg/bootstrap/ -run 'TestPhase154_' -count=1 -timeout 60m
+
       # 151A Step 1, the native value/frame foundation in kcc. The three-way
       # differential (kcc vs the Go oracle's Emitter vs bytes stated from the
       # Intel SDM) is what makes the frame layout trustworthy, so this gate is
@@ -742,6 +748,99 @@ jobs:
           path: diag/
           if-no-files-found: warn
           retention-days: 30
+
+  # B2: the seed-closure proof, isolated on purpose.
+  #
+  # `TestBootstrap_SeedClosure` is quarantined in the `test` job: it requires
+  # >=1.5 GiB of *physical* free RAM (the Windows probe reads AvailPhys and the
+  # Linux probe MemAvailable), it runs three full-tree transpile+link stages
+  # with a five-minute timeout per child, and PHASE-143-FINAL-REPORT.md section F
+  # records five consecutive GitHub-runner deaths ~35s into the stage-2
+  # transpile (exit 143) with no reachable OOM/timer/crash fingerprint. It
+  # therefore belongs in its own job, not combined into the shared `test` job,
+  # per AGENTS.md's "heavy gates are never combined" rule.
+  #
+  # THIS JOB IS DISCOVERY, NOT A RELEASE GATE. It is not listed as a required
+  # check, so it reports red without blocking anything, and B2 stays OPEN until
+  # a run here actually completes both proofs. A skip, timeout, exit 143, or a
+  # partial stage build is explicitly a FAILURE, never a pass -- see the
+  # verification step.
+  #
+  # EVIDENCE LIMITATION, stated rather than papered over: the test's
+  # `cleanupBinaries` deletes bin/karkain-{stage1,compiler1,compiler2,compiler3}
+  # unconditionally when the test function returns, i.e. BEFORE this job can run
+  # an upload step. The stage binaries therefore cannot be retained by a
+  # workflow change alone. What IS retained is the complete test log, which
+  # carries each stage's size and SHA-256 prefix, the stage-2/stage-3 equality
+  # verdict, and the Go-shadow and gcc-resolution assertions. Retaining the
+  # binaries would need an env-gated escape hatch in cleanupBinaries (Go test
+  # source), which is a separate change requiring its own approval.
+  bootstrap-closure:
+    name: B2 seed closure (discovery, non-gating)
+    runs-on: ubuntu-latest
+    # No GOMEMLIMIT here, unlike the `test` job. That cap exists to bound the
+    # COMBINED-suite flake class; this job runs one test, and dropping the
+    # variable keeps the exit-143 diagnosis from having an extra unknown.
+    timeout-minutes: 60
+    env:
+      KARKAIN_SEED_CLOSURE: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Install GCC and GMP
+        run: sudo apt-get update && sudo apt-get install -y gcc libgmp-dev
+
+      - name: Show toolchain and available memory
+        run: |
+          echo "go: $(go version)"
+          echo "gcc: $(gcc -dumpversion)"
+          grep -E 'MemTotal|MemAvailable' /proc/meminfo
+
+      # `tee` writes the log incrementally, so an external kill (exit 143) still
+      # leaves a partial log on disk for the upload step below. pipefail keeps
+      # the step's exit status the test's, not tee's.
+      - name: Run TestBootstrap_SeedClosure
+        run: |
+          set -o pipefail
+          go test ./pkg/bootstrap/ -run '^TestBootstrap_SeedClosure$' -count=1 -v 2>&1 | tee seed-closure.log
+
+      - name: Verify the closure actually completed
+        if: always()
+        run: |
+          if [ ! -f seed-closure.log ]; then
+            echo "::error::no log produced; the test never ran (killed before output?)"
+            exit 1
+          fi
+          if grep -q -- '--- SKIP: TestBootstrap_SeedClosure' seed-closure.log; then
+            echo "::error::TestBootstrap_SeedClosure SKIPPED. B2 is NOT proven -- a skip is not evidence (error[K127] memory guard, or absent go/gcc)."
+            grep -E 'K127|insufficient' seed-closure.log || true
+            exit 1
+          fi
+          if grep -q -- 'FAIL' seed-closure.log; then
+            echo "::error::seed closure FAILED -- inspect the log before drawing any conclusion."
+            grep -E 'FAIL|Error|error\[' seed-closure.log | head -20 || true
+            exit 1
+          fi
+          if ! grep -q 'seed closure: stage2 == stage3 bitwise identical' seed-closure.log; then
+            echo "::error::no stage2 == stage3 witness line. The closure did not complete; B2 is NOT proven."
+            grep -E 'Stage [123]' seed-closure.log || true
+            exit 1
+          fi
+          echo "Both proofs witnessed: stage identity plus go-less completion (see the log for sizes and SHA-256 prefixes)."
+
+      - name: Upload seed-closure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seed-closure
+          path: seed-closure.log
+          if-no-files-found: warn
+          retention-days: 30
+
   native-evidence:
     # Phase 147A: decisive-evidence gatherer for the native-execution P1
     # (docs/audit/PHASE-145-QUARANTINE.md). Informational ONLY

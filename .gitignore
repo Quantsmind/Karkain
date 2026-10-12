@@ -61,6 +61,10 @@ examples/12-scientific-computing/*.c
 examples/13-finance/*.c
 examples/14-security/*.c
 examples/15-developer-tools/*.c
+examples/04-networking/*.c
+examples/06-database/*.c
+examples/07-web/*.c
+examples/generics/*.c
 examples/probes/**/*.c
 examples/probes/**/*.c23
 *.c23
@@ -88,3 +92,10 @@ __pycache__/
 # WASM build outputs (karkain build --target wasm32-wasi)
 examples/wasm/**/build/
 examples/self-hosting/**/*.c
+
+# Differential oracle for the Go toolchain (154 / I-6): the archived Go CLI and
+# Go-engine C. Off the user path; never deleted.
+/reference/*
+!/reference/README.md
+!/reference/README.md
+

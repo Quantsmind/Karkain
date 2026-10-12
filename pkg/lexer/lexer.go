@@ -181,6 +181,19 @@ type Lexer struct {
 	Ch           byte
 	Line         int
 	Col          int
+	// Errors collects lexical diagnostics (e.g. an unterminated string
+	// literal). The parser drains these into its own error list so a
+	// malformed token is reported instead of silently accepted. Kept
+	// dependency-free (no fmt) by storing the structured line/col here; the
+	// parser formats the final message.
+	Errors    []LexError
+}
+
+// LexError is a lexical diagnostic with a 1-based-ready source position.
+type LexError struct {
+	Line int
+	Col  int // 1-based column of the offending token
+	Msg  string
 }
 
 // GetInput returns the lexer's input string (needed for C import parsing)
@@ -471,6 +484,12 @@ func (l *Lexer) scanString() Token {
 
 	for {
 		if l.Ch == 0 {
+			// Reached EOF without a closing quote. The old code broke here and
+			// returned a valid STRING token spanning to EOF, so `print("Hello`
+			// (no close) silently swallowed the rest of the file — including the
+			// closing brace — and built. Record a lexical error so the parser
+			// rejects it; the token is still returned so recovery can continue.
+			l.Errors = append(l.Errors, LexError{Line: startLine, Col: startCol + 1, Msg: "unterminated string literal"})
 			break
 		}
 		if l.Ch == '\\' {

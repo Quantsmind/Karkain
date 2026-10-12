@@ -318,6 +318,17 @@ func KCCCheckCommand(w io.Writer, file string, verbose bool) CommandResult {
 // (as KCCRunCommand does) so kcc only ever loads the single assembled file and
 // build artifacts never sit next to the source.
 func KCCBuildCommand(w io.Writer, file, outputPath string, cfg codegen.Config, verbose bool) CommandResult {
+	// Phase: run the Go-side multi-file syntax preflight before handing to the
+	// self-hosted engine, exactly as KCCCheckCommand does. Without it, `build`
+	// relied solely on kcc's own parser, which silently recovered several
+	// malformed inputs (bare '@', `1 @ 2`, missing '}'/')', unterminated
+	// strings) and produced an image — an invalid program that "built". The Go
+	// reference parser is the authoritative syntax gate, so both engine paths
+	// now reject the same inputs with precise per-file spans.
+	if errDiags := projectSyntaxDiagnostics(file); len(errDiags) > 0 {
+		renderDiagnostics("", errDiags)
+		return CommandResult{ExitCode: ExitCompile, Message: checkStageMessage(checkStageSyntax, len(errDiags))}
+	}
 	bin, err := kccBinaryPath(w)
 	if err != nil {
 		return CommandResult{ExitCode: ExitEnv, Message: err.Error()}
@@ -742,6 +753,16 @@ func kccMirrorTestDir(src, dst string) error {
 // KCCRunCommand routes `karkain run` through the self-hosted engine: build to
 // C23, link with gcc, then execute the native binary and surface its output.
 func KCCRunCommand(w io.Writer, file string, cfg codegen.Config, verbose bool) CommandResult {
+	// Phase: same Go-side syntax preflight as KCCCheckCommand/KCCBuildCommand.
+	// `run` is the default command and the default engine is kcc, so without
+	// this gate a malformed program (bare '@', `1 @ 2`, missing '}'/')',
+	// unterminated string) parsed by kcc's own error-recovering parser, linked,
+	// and EXECUTED — the exact "invalid program builds and runs" defect. The Go
+	// reference parser is authoritative; gate on it before any artifact exists.
+	if errDiags := projectSyntaxDiagnostics(file); len(errDiags) > 0 {
+		renderDiagnostics("", errDiags)
+		return CommandResult{ExitCode: ExitCompile, Message: checkStageMessage(checkStageSyntax, len(errDiags))}
+	}
 	bin, err := kccBinaryPath(w)
 	if err != nil {
 		return CommandResult{ExitCode: ExitEnv, Message: err.Error()}
