@@ -92,3 +92,10 @@ __pycache__/
 # WASM build outputs (karkain build --target wasm32-wasi)
 examples/wasm/**/build/
 examples/self-hosting/**/*.c
+
+# Differential oracle for the Go toolchain (154 / I-6): the archived Go CLI and
+# Go-engine C. Off the user path; never deleted.
+/reference/*
+!/reference/README.md
+!/reference/README.md
+

@@ -322,6 +322,12 @@ jobs:
       - name: Run Increment 152-B2 native sha256_hex gate
         run: go test ./pkg/native/ -run 'TestPhase152B2_|TestSHA256Harness_' -count=1 -timeout 20m
 
+      # Increment 154 (v1.2.0) — I-6 self-bootstrap: retires the
+      # `KARKAIN_ENGINE=go` stage-1 pin so compiler children run the default
+      # self-hosted kcc engine ("kcc builds kcc").
+      - name: Run Increment 154 self-bootstrap gate
+        run: go test ./pkg/bootstrap/ -run 'TestPhase154_' -count=1 -timeout 60m
+
       # 151A Step 1, the native value/frame foundation in kcc. The three-way
       # differential (kcc vs the Go oracle's Emitter vs bytes stated from the
       # Intel SDM) is what makes the frame layout trustworthy, so this gate is

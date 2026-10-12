@@ -122,7 +122,10 @@ func runCmdOutputLabel(dir, label, name string, args ...string) ([]byte, error) 
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	setSourceDateEpoch(cmd)
-	forceGoEngine(cmd)
+	if goEnginePin {
+		forceGoEngine(cmd)
+	}
+	compilerChildEnv = cmd.Env
 	stop := startProgress(ctx, label)
 	defer stop()
 	return cmd.CombinedOutput()
@@ -148,6 +151,40 @@ func setSourceDateEpoch(cmd *exec.Cmd) {
 // never produce the expected C artifact.
 func forceGoEngine(cmd *exec.Cmd) {
 	cmd.Env = append(cmd.Env, "KARKAIN_ENGINE=go")
+}
+
+// goEnginePin controls whether the bootstrap pipeline forces the Go engine on
+// every compiler child it launches. Default: true (the pre-154 state, in which
+// stages 2 and 3 also ran the Go engine). Increment 154 retires the pin: the
+// compiler children then run the default engine, the self-hosted kcc, so
+// "kcc builds kcc".
+var goEnginePin = true
+
+// SetGoEnginePin sets the pin (test helper).
+func SetGoEnginePin(v bool) {
+	goEnginePin = v
+}
+
+// GoEnginePinRetired reports whether the stage-1 Go engine pin is retired.
+func GoEnginePinRetired() bool {
+	return !goEnginePin
+}
+
+// RetireGoEnginePin retires the stage-1 Go engine pin. After this call, every
+// compiler child the bootstrap launches runs the default engine (the
+// self-hosted kcc) with no KARKAIN_ENGINE=go in its environment.
+func RetireGoEnginePin() {
+	goEnginePin = false
+}
+
+// compilerChildEnv records the environment of the last compiler child the
+// pipeline launched, for the 154 pin-retired gate.
+var compilerChildEnv []string
+
+// CompilerChildEnv returns the environment of the last compiler child launched
+// by the pipeline (nil before any child is launched).
+func CompilerChildEnv() []string {
+	return compilerChildEnv
 }
 
 // RunBootstrap executes the 3-stage bootstrap pipeline.
