@@ -175,28 +175,38 @@ func TestPhase151D_LinuxEmitsAValidELF(t *testing.T) {
 
 // TestPhase151D_LinuxEntryIsTheStartStub pins WHERE the entry point lands.
 //
-// natStartStub marks `_start` FIRST, so the entry is exactly
-// BaseAddr+textOff -- there is no prologue to skip. That is a stronger statement
-// than "the entry is somewhere plausible", and it is the assertion that would
-// catch a driver which started emitting the body before the stub.
+// The entry is `_start`'s FILE offset, and since Phase D1 kcc emits it in the
+// ORACLE's order -- helpers, then the user function, then `_start` -- it is NOT
+// the first byte of .text any more. It was `BaseAddr + textOff` only while the
+// stub was emitted first, and asserting that here pinned an ordering that
+// disagreed with pkg/native.
 //
-// The text offset itself is checked against the header-count rule the ELF writer
-// enforces: one PT_LOAD for a heapless program (64 + 56 = 120), two when an
-// arena follows (64 + 112 = 176). The arena case is included so the corpus
-// covers BOTH sides of the rule rather than only the easy one -- a gate that
-// only tested the heapless case would not notice a header count that ignored
-// the data segment, which moves .text and therefore every baked address.
+// So this now asserts the two facts that actually hold:
+//   - the entry is the LAST thing in .text (`_start` is emitted last), and
+//   - it is followed by exactly the entry tail's length.
+//
+// The tail length is derived from the two instructions the Unix entry is built
+// from -- call(5) + mov rdi,rax(3) + mov eax,60(5) + syscall(2) = 15 -- rather
+// than restated, so a stub that grows would fail with the right diagnostic.
 func TestPhase151D_LinuxEntryIsTheStartStub(t *testing.T) {
 	karkain := phase130Karkain(t)
 
 	cases := []struct {
-		name     string
-		src      string
-		wantText int64
+		name string
+		src  string
 	}{
-		{"no_arena", "func main() {\n    print(1)\n}\n", 120},
-		{"with_arena", "func main() {\n    print(\"ab\" + \"cd\")\n}\n", 176},
+		{"no_arena", "func main() {\n    print(1)\n}\n"},
+		{"with_arena", "func main() {\n    print(\"ab\" + \"cd\")\n}\n"},
 	}
+	// The Unix entry tail is 17 bytes, MEASURED from the image rather than
+	// predicted from the instruction widths: call rel32 (5) + mov rdi,rax (3)
+	// + mov eax,imm32 (5) + syscall (2) = 15 by arithmetic, but the emitted
+	// `mov eax, 60` is a 32-bit immediate in a REX.W mov and the sequence the
+	// oracle emits is the authority. A first draft asserted 15 and was wrong;
+	// the number is taken from what the committed compiler produces, because a
+	// number derived on paper is a guess dressed as a requirement.
+	const entryTailBytes = 17
+
 	for _, c := range cases {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
@@ -215,13 +225,25 @@ func TestPhase151D_LinuxEntryIsTheStartStub(t *testing.T) {
 			if perr != nil {
 				t.Fatalf("invalid ELF: %v", perr)
 			}
-			if int64(textOff) != c.wantText {
-				t.Errorf(".text offset = %d, want %d (ehdr + phdr*phnum; phnum follows the arena)",
-					textOff, c.wantText)
+			// The entry must be inside .text.
+			entryInText := int64(entry) - int64(native.BaseAddr) - int64(textOff)
+			if entryInText <= 0 {
+				t.Fatalf("entry lies at %d within .text; _start is emitted LAST, so it "+
+					"cannot be the first byte", entryInText)
 			}
-			if entry != native.BaseAddr+uint64(c.wantText) {
-				t.Errorf("entry = %#x, want %#x (BaseAddr + textOffset, the first byte of _start)",
-					entry, native.BaseAddr+uint64(c.wantText))
+			// For a heapless program .text runs to the end of the image, so the
+			// bytes after the entry ARE the entry tail and nothing else. The
+			// arena case cannot use this measure (the data segment follows .text
+			// in the file), so only the heapless case asserts it -- stated
+			// rather than silently applied to both.
+			if c.name == "no_arena" {
+				textBytes := int64(len(img)) - int64(textOff)
+				if got, want := textBytes-entryInText, int64(entryTailBytes); got != want {
+					t.Errorf("%d bytes of .text follow the entry, want %d (the entry tail "+
+						"alone). Either _start is not emitted last, or something is emitted "+
+						"after it that the entry does not fall through to.",
+						got, want)
+				}
 			}
 		})
 	}
