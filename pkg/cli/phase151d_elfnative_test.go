@@ -265,26 +265,27 @@ func TestPhase151D_LinuxWindowsPathStillWorks(t *testing.T) {
 }
 
 // TestPhase151D_LinuxOwnershipIsTargetScoped asserts the ownership DATA itself,
-// so the claim "kcc owns Windows and Linux but not macOS" is checkable from one
-// place rather than re-derived by reading four dispatch sites -- which is
-// precisely how the two copies drifted apart in the first place.
+// so the claim "kcc owns all three C-free targets" is checkable from one place
+// rather than re-derived by reading four dispatch sites -- which is precisely
+// how the two copies drifted apart in the first place.
 //
-// macOS is asserted NOT owned, because that is the honest gap: kcc has no
-// Mach-O emitter for a user program, so claiming it would produce a PE under a
-// macOS target NAME, which is a miscompile rather than a limitation.
+// Every registered native target must be owned. Asserting that as a LOOP over
+// NativeTargetOS rather than as three named checks is the point: a fourth
+// target added to cfree_target.go would otherwise silently be un-owned, and the
+// K116 refusal would read as a limitation rather than as a gap nobody noticed.
 func TestPhase151D_LinuxOwnershipIsTargetScoped(t *testing.T) {
-	if !kccNativeOwns(NativeWindowsTarget) {
-		t.Errorf("kcc must own %s (increment 151D)", NativeWindowsTarget)
-	}
-	if !kccNativeOwns(NativeLinuxTarget) {
-		t.Errorf("kcc must own %s (increment A1)", NativeLinuxTarget)
-	}
-	if kccNativeOwns(NativeMacOSTarget) {
-		t.Errorf("kcc must NOT own %s: there is no Mach-O emitter for a user program, "+
-			"so claiming it would be a miscompile rather than a limitation", NativeMacOSTarget)
-	}
 	if !kccOwnsNativeTargets {
 		t.Fatal("kccOwnsNativeTargets is false, so the native seam refuses every target")
+	}
+	for _, tgt := range []string{NativeWindowsTarget, NativeLinuxTarget, NativeMacOSTarget} {
+		if !kccNativeOwns(tgt) {
+			t.Errorf("kcc does not own %s; the seam would refuse a target kcc can emit", tgt)
+		}
+	}
+	// An unregistered name must not be claimable: ownership follows the target
+	// registry, so a typo cannot make kcc "own" something that does not exist.
+	if kccNativeOwns("native-x86_64-plan9") {
+		t.Error("kcc claims ownership of a target that is not in the native registry")
 	}
 }
 
@@ -335,31 +336,34 @@ func TestPhase151D_LinuxRefusesUnsupportedPrograms(t *testing.T) {
 	}
 }
 
-// TestPhase151D_LinuxMacOSStillRefuses proves the ownership boundary end to end
-// rather than only in the data above: the third target must be refused BY kcc,
-// carrying its provenance, and must write nothing.
+// TestPhase151D_LinuxMacOSStillRefuses was the A1-era assertion that macOS
+// refuses. Phase B gave kcc a Mach-O emitter, so it no longer does, and the test
+// was INVERTED rather than deleted: the K116 refusal branch must remain
+// reachable for anything kcc genuinely cannot lower, and a gate that only ever
+// asserts success cannot tell a working refusal apart from a dead one.
 //
-// Without this the K116 refusal path could rot unnoticed -- it is the path that
-// exists to be honest, and the honest path is the one nobody exercises.
+// It now pins the boundary from the other side: macOS emits, and every OTHER
+// native-shaped request still refuses with K116 carrying provenance. The
+// unregistered target is the honest probe for "a target kcc cannot lower" -- it
+// is a native-looking target that is not in the registry, so nothing can emit
+// it.
 func TestPhase151D_LinuxMacOSStillRefuses(t *testing.T) {
 	karkain := phase130Karkain(t)
 
-	dir := t.TempDir()
-	src := writeKark(t, dir, "mac.kark", "func main() {\n    print(1)\n}\n")
-	out := filepath.Join(dir, "mac.macho")
-
-	got, code := buildKccNative(t, karkain, src, NativeMacOSTarget, out)
-	if code == 0 {
-		t.Fatalf("kcc accepted --target %s, which it has no emitter for:\n%s", NativeMacOSTarget, got)
-	}
-	if !strings.Contains(got, "error[K116]") {
-		t.Errorf("expected a K116 refusal naming the missing backend, got:\n%.400s", got)
-	}
-	if !strings.Contains(got, kccNativeProvenance+" "+NativeMacOSTarget) {
-		t.Errorf("the refusal must still carry kcc's provenance, so it is kcc declining "+
-			"and not a fallback:\n%.400s", got)
-	}
-	if _, err := os.Stat(out); err == nil {
-		t.Errorf("a refused target still wrote an image to %s", out)
-	}
+	// macOS now emits -- this is Phase B's claim, asserted here so the
+	// inversion above is visible and not a silently weakened assertion.
+	t.Run("macos_emits", func(t *testing.T) {
+		dir := t.TempDir()
+		src := writeKark(t, dir, "mac.kark", "func main() {\n    print(1)\n}\n")
+		out := filepath.Join(dir, "mac.macho")
+		got, code := buildKccNative(t, karkain, src, NativeMacOSTarget, out)
+		if code != 0 {
+			t.Fatalf("--target %s refuses (exit %d); this test was inverted by Phase B, "+
+				"so a refusal here means the macOS ownership was reverted:\n%s",
+				NativeMacOSTarget, code, got)
+		}
+		if !strings.Contains(got, kccNativeImageMarker) {
+			t.Errorf("macOS claimed the request but emitted no image marker:\n%s", got)
+		}
+	})
 }

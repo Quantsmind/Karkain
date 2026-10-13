@@ -604,15 +604,21 @@ func TestPhase151A9D_NoGoFallback(t *testing.T) {
 		t.Fatalf("writing the test program: %v", err)
 	}
 
-	// macOS only. Phase A1 gave kcc the Linux ELF target, so the "kcc does not
-	// own this target, therefore it must refuse" property no longer applies to
-	// Linux -- its no-fallback guarantee is now "must EMIT with provenance", and
-	// that is asserted in TestPhase151_NoSilentGoFallback (which keys on
-	// kccNativeOwns) and end-to-end in TestPhase151D_LinuxEmitsAValidELF. Listing
-	// Linux here would assert a refusal that is no longer the honest answer.
-	for _, tgt := range []string{NativeMacOSTarget} {
+	// Every registered native target, driven by the OWNERSHIP DATA rather than
+	// by an inline list. This is the third time this shape had to be edited
+	// because a target changed hands (Linux in A1, macOS in Phase B), so it now
+	// asks one question per target -- "does kcc own this?" -- and asserts the
+	// matching outcome. A fourth target added to cfree_target.go is then covered
+	// the day it is registered, with no edit here, and an un-owned one is
+	// automatically required to refuse instead of quietly succeeding.
+	//
+	// BOTH outcomes require provenance: a refusal that kcc did not print is a
+	// different failure from one it did, and a success without provenance is the
+	// Go-fallback regression this whole increment exists to prevent.
+	for _, tgt := range []string{NativeWindowsTarget, NativeLinuxTarget, NativeMacOSTarget} {
 		tgt := tgt
-		t.Run("refuses "+tgt, func(t *testing.T) {
+		owned := kccNativeOwns(tgt)
+		t.Run("target "+tgt, func(t *testing.T) {
 			out, err := exec.Command(karkain, "build", "--target", tgt, src).CombinedOutput()
 			code := 0
 			if ee, ok := err.(*exec.ExitError); ok {
@@ -621,9 +627,29 @@ func TestPhase151A9D_NoGoFallback(t *testing.T) {
 				t.Fatalf("running karkain build (%s): %v", tgt, err)
 			}
 			s := string(out)
+
+			if !strings.Contains(s, kccNativeProvenance+" "+tgt) {
+				t.Fatalf("%s: no kcc provenance line, so the self-hosted engine was never "+
+					"actually consulted for this target:\n%.400s", tgt, s)
+			}
+
+			if owned {
+				if code != 0 {
+					t.Errorf("%s: kcc owns this target but the default-engine build failed "+
+						"(exit %d):\n%.400s", tgt, code, s)
+				}
+				if !strings.Contains(s, kccNativeImageMarker) {
+					t.Errorf("%s: kcc owns this target but emitted no image marker, so the "+
+						"bytes cannot be attributed to it:\n%.400s", tgt, s)
+				}
+				return
+			}
+
+			// Not owned: a refusal, and NOTHING on disk. A refusal that still
+			// leaves an image behind is not a refusal.
 			if !strings.Contains(s, "K116") {
-				t.Errorf("%s: native target build did not refuse with K116; kcc does not own "+
-					"this target, so a silent success would be the Go-fallback regression.%s",
+				t.Errorf("%s: kcc does not own this target but the build did not refuse "+
+					"with K116; a silent success would be the Go-fallback regression:\n%.400s",
 					tgt, s)
 			}
 			if code != 6 {
@@ -638,26 +664,4 @@ func TestPhase151A9D_NoGoFallback(t *testing.T) {
 			}
 		})
 	}
-
-	// The target kcc owns: built by the DEFAULT engine, which is kcc. Success
-	// here is the point of 151D, but it is only legitimate WITH provenance.
-	t.Run("owns native-x86_64-windows", func(t *testing.T) {
-		out, err := exec.Command(karkain, "build", "--target", NativeWindowsTarget, src).CombinedOutput()
-		code := 0
-		if ee, ok := err.(*exec.ExitError); ok {
-			code = ee.ExitCode()
-		} else if err != nil {
-			t.Fatalf("running karkain build: %v", err)
-		}
-		s := string(out)
-		if code != 0 {
-			t.Fatalf("%s: kcc owns this target in 151D but the default-engine build failed "+
-				"(exit %d):\n%.400s", NativeWindowsTarget, code, s)
-		}
-		if !strings.Contains(s, kccNativeProvenance+" "+NativeWindowsTarget) {
-			t.Errorf("%s: a default-engine native build succeeded with no kcc provenance; "+
-				"without it the image cannot be attributed to the self-hosted engine:\n%.400s",
-				NativeWindowsTarget, s)
-		}
-	})
 }

@@ -537,13 +537,33 @@ func natStIatIdx(s) { return s[12] }
 func natStHeapPos(s) { return s[13] }
 func natStHeapOff(s) { return s[14] }
 
+// Phase A1 (slot 15): the TARGET OS the emitter is producing for, read by the
+// write path and the exit tail to pick the syscall numbers.
+//
+// It lives in the emitter state rather than in a parameter because those two
+// sites are reached from ~16 call sites inside the frozen print helpers, and
+// threading an OS argument through every one of them would touch a lot of code
+// that is otherwise byte-frozen. Reading it from the state is why the helpers
+// need no signature change at all.
+//
+// 0 = Linux (write 1, exit 60), 1 = Windows (no raw syscall at all), 2 = macOS
+// (write 0x2000004, exit 0x2000001). Zero is Linux so that EVERY existing
+// emitter state -- each of the measurement corpora builds its own with
+// natNewEmitter(0) -- keeps its current bytes without being told anything.
+func natStTargetOS(s) { return s[15] }
+func natSetTargetOS(s, os) {
+    s[15] = os
+    return s
+}
+
 // natNewEmitter returns a fresh emitter state: empty code, no labels, no
 // rel32 fixups, no imm64 placeholders.
 // Phase 151A Step 9g grows the state from thirteen slots to fifteen.
-// natNewEmitter is the ONLY constructor, so this is purely additive: no
-// existing emission changes and no previously-shipped byte moves.
+// Phase A1 grows it again to sixteen (the target OS), so it is sixteen slots
+// long; natNewEmitter is the ONLY constructor, so this stays purely additive:
+// no existing emission changes and no previously-shipped byte moves.
 func natNewEmitter(unused) {
-    return [[], [], [], [], [], [], [], [], [], [], [], [], [], [], []]
+    return [[], [], [], [], [], [], [], [], [], [], [], [], [], [], [], []]
 }
 
 // natLen reports how many bytes have been emitted so far. It is the value

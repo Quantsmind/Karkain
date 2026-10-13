@@ -336,26 +336,22 @@ func TestPhase151_KccNativeRefusalIsNotAFallback(t *testing.T) {
 			"the flag was supposed to be inverted in the same change that wires it")
 	}
 
-	// Exactly the targets kcc can emit. Phase A1 added Linux through the same
-	// driver, so the assertion moves with the data rather than staying pinned to
-	// the 151D single-target list -- which is precisely how it drifted once
-	// already.
-	for _, tgt := range []string{NativeWindowsTarget, NativeLinuxTarget} {
+	// Exactly the targets kcc can emit. A1 added Linux and Phase B macOS, each
+	// through the same driver, so the assertion follows the data rather than
+	// staying pinned to the 151D single-target list -- which is precisely how it
+	// drifted once already. A fourth target added to cfree_target.go without a
+	// driver arm would be caught by the registry check below rather than
+	// silently becoming a refusal nobody notices.
+	for _, tgt := range []string{NativeWindowsTarget, NativeLinuxTarget, NativeMacOSTarget} {
 		if !kccNativeOwns(tgt) {
 			t.Errorf("%s is NOT listed as kcc-owned, but kcc emits it: the flag claims "+
 				"less than the data supports, and the target would fall through to a refusal "+
 				"the engine could have answered", tgt)
 		}
 	}
-	// macOS is the one target that must NOT be claimed: kcc has no Mach-O
-	// emitter for a user program (native_macho.kark lowers a fixed reference
-	// corpus only). Claiming it would turn a refusal into a false success, and
-	// the runtime cannot detect the difference -- the user would just see a
-	// plausible-looking error for a target the engine could have handled.
-	for _, tgt := range []string{NativeMacOSTarget} {
-		if kccNativeOwns(tgt) {
-			t.Errorf("%s is listed as kcc-owned, but kcc has no Mach-O emitter for a "+
-				"user program. Claiming it would turn a refusal into a false success", tgt)
-		}
+	// An unregistered target must not be claimable, so a typo cannot make kcc
+	// "own" a container that does not exist.
+	if kccNativeOwns("native-x86_64-plan9") {
+		t.Error("kcc claims ownership of a target that is not in the native registry")
 	}
 }
