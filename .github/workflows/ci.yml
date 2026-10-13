@@ -276,6 +276,20 @@ jobs:
       - name: Run Phase A1 kcc native Linux ELF gate
         run: go test ./pkg/cli/ -run 'TestPhase151D_Linux' -count=1 -timeout 30m -v
 
+      # Phase B, kcc owns native-x86_64-macos. Named explicitly for the same
+      # reason as the A1 step above, and the pattern 'TestPhaseB_' is deliberately
+      # distinct from 'TestPhase151' so a Mach-O regression cannot hide behind a
+      # green broad step.
+      #
+      # Every claim this gate makes is STRUCTURAL: there is no macOS runner in
+      # this matrix (all jobs are ubuntu or windows) and no Intel-Mac host in the
+      # project's history, so the Mach-O images are validated by the ORACLE's
+      # ParseMachO and its rebase-stream decoder rather than executed. That is
+      # the same boundary increments 149 and 150D established, and the step is
+      # NOT gated on GOOS because its assertions are host-independent.
+      - name: Run Phase B kcc native Mach-O gate
+        run: go test ./pkg/cli/ -run 'TestPhaseB_' -count=1 -timeout 30m -v
+
       # Phase 151C3, the PE32+ container. It lives in pkg/native rather than
       # pkg/cli because the differential needs the Go Builder's unexported
       # patch fields, which a pkg/cli gate cannot construct. The existing

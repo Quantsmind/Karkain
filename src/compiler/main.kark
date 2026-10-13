@@ -649,14 +649,16 @@ func buildNativeFile(path, target) {
       // The provenance line above is load-bearing: the Go layer must see it
       // before it will write any bytes, so an image without provenance can
       // never be presented as a kcc build.
-      if (target == "native-x86_64-windows" || target == "native-x86_64-linux") {
-        // nwin selects the container and entry path: 1 = PE + Win64 entry/PEB
-        // bootstrap, 0 = ELF + Linux `_start` + the raw write(2) syscall. It is
-        // derived once here rather than re-tested inside the driver, so the
-        // target-name comparison exists in exactly one place per file.
-        let nwin = 0
-        if (target == "native-x86_64-windows") { nwin = 1 }
-        let nres = natNativeProgramOS(ast, nwin)
+      if (isNativeTarget(target)) {
+        // targetOS is the container/entry identity, and it is the ONLY
+        // OS-dependent input to the whole driver: 0 Linux, 1 Windows, 2 macOS.
+        // It is derived once here so each target name is compared in exactly
+        // one place per file, rather than re-tested inside the driver where
+        // three copies could drift.
+        let nos = 0
+        if (target == "native-x86_64-windows") { nos = 1 }
+        if (target == "native-x86_64-macos") { nos = 2 }
+        let nres = natNativeProgramOS(ast, nos)
         if (nres[0] != "") {
           print(nres[0])
           return
@@ -666,9 +668,7 @@ func buildNativeFile(path, target) {
         return
       }
 
-      print("error[K116]: the self-hosted engine (kcc) emits a native image for native-x86_64-windows and native-x86_64-linux only, so it cannot emit --target " + target + ".")
-      print("  kcc has no Mach-O emitter for a user program: native_macho.kark lowers")
-      print("  the fixed reference corpus that 151C2 compares against the Go oracle, and it does not take one.")
+      print("error[K116]: the self-hosted engine (kcc) cannot emit --target " + target + ".")
       print("  This is refused here, by kcc, rather than silently handed to the Go engine.")
       print("  The " + target + " C-free target is implemented by the Go backend alone.")
 }

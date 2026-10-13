@@ -397,10 +397,40 @@ func natRegR11() { return 11 }
 // separate pushed copy because the write syscall clobbers volatile registers.
 // ============================================================
 
-// natSysWrite is the Linux write(2) syscall number. macOS uses 0x2000004 and is
-// not implemented here; the Linux exit tail's 60 (__NR_exit) is spelled as a
-// literal in natStartStub for the same reason.
-func natSysWrite() { return 1 }
+// The three target OS identities, in the one place they are spelled. They are
+// stored in the emitter state (slot 15) rather than passed as arguments because
+// natWriteStdout is reached from ~16 call sites inside the frozen print helpers.
+func natOSLinux() { return 0 }
+func natOSWindows() { return 1 }
+func natOSMac() { return 2 }
+
+// natSysWrite is the raw write(2) syscall number for the target OS.
+//
+// Linux and macOS both reach the kernel through a raw syscall, but with
+// DIFFERENT numbers: Linux is 1, Darwin numbers its syscalls with a 0x2000000
+// prefix and write is 0x2000004. The oracle spells the same choice in
+// Builder.sysWrite (pkg/native/program.go:62-67) and getting it wrong is not a
+// loud failure -- the syscall would trap.
+//
+// The Darwin values are written as ARITHMETIC (33554432 + n) rather than as
+// hand-converted decimal, because this file has no hex literals and increment
+// 151B recorded exactly that failure: hand-converting 0x0F produced 21 (0x15)
+// and the emitted output was not x86 at all. Writing 33554432 + 4 keeps the
+// relationship to the 0x2000000 prefix visible, so a wrong constant has to be
+// wrong in a way a reader can spot, and the gate asserts the decimal values
+// independently.
+func natSysWrite(isMac) {
+    if (isMac) { return 33554432 + 4 }
+    return 1
+}
+
+// natSysExit is the exit syscall number for the target OS: Linux __NR_exit is
+// 60, Darwin's is 0x2000001 = 0x2000000 + 1. Mirrors Builder.sysExit
+// (program.go:70-75). Same arithmetic-not-literal rule as natSysWrite.
+func natSysExit(isMac) {
+    if (isMac) { return 33554432 + 1 }
+    return 60
+}
 
 // natRodataRef emits `mov r64, <absolute rodata address>` as a placeholder plus
 // a recorded patch position, mirroring rodataRef's imm64Patch+internRodata.
@@ -423,7 +453,9 @@ func natRodataRef(s, r) {
 // through a helper that is itself named write is how the 148C replaceAll once
 // produced infinite self-recursion.
 func natWriteStdout(s) {
-    s = natMovRegImm32(s, natRegRAX(), natSysWrite())
+    let isMac = 0
+    if (natStTargetOS(s) == natOSMac()) { isMac = 1 }
+    s = natMovRegImm32(s, natRegRAX(), natSysWrite(isMac))
     return natSyscall(s)
 }
 
@@ -1413,14 +1445,34 @@ func natLoopCorpus(which) {
 // first said 12; the arithmetic is 15-5. The gate DERIVED 10 from the
 // encodings and passed, so the wrong number was here, not there.)
 func natStartStub() {
+    return natStartStubOS(natOSLinux())
+}
+
+// natStartStubOS is the Unix-family entry: call karkain_main, move its return
+// into RDI (the exit status), load the OS's exit syscall number, syscall.
+//
+// macOS shares this shape with Linux word for word -- the difference is ONLY the
+// exit number (0x2000001 vs 60). That is why it is one function with a
+// parameter rather than a second stub: a duplicate would be a second place for
+// the two entry paths to drift apart, and the identical shape is precisely what
+// makes the sharing correct.
+//
+// It creates its OWN emitter state (as every stub does) and stamps the target OS
+// onto it before emitting, because the exit tail reads it from there. The stamp
+// is what makes natWriteStdout -- reached later, from the body and the print
+// helpers -- use the Darwin write number in the same image.
+func natStartStubOS(os) {
     let s = natNewEmitter(0)
+    s = natSetTargetOS(s, os)
     s = natMark(s, "_start")
     s = natCall32(s)
     let r = natRel32(s, "karkain_main")
     s = r[0]
     s = natMovRegReg(s, natRegRDI(), natRegRAX())
-    // 60 is __NR_exit on Linux. macOS uses 0x2000001 and is out of scope.
-    s = natMovRegImm32(s, natRegRAX(), 60)
+    // The exit number follows the OS: 60 is Linux __NR_exit, 0x2000001 Darwin's.
+    let isMac = 0
+    if (os == natOSMac()) { isMac = 1 }
+    s = natMovRegImm32(s, natRegRAX(), natSysExit(isMac))
     s = natSyscall(s)
     s = natMark(s, "karkain_main")
     return s
@@ -4466,38 +4518,41 @@ s = natCallPrintInt(s)
 // natNativeProgram compiles a PARSED PROGRAM to a native PE image. It is the
 // Windows-only entry point and is retained so `karkain native-ast` and every
 // frozen 151A Step 9c-9h gate keep driving exactly the code they were gated
-// against. Phase A1 adds the Linux container behind natNativeProgramOS, which
-// shares this whole body; `natNativeProgram` is now a one-line wrapper naming
-// the Windows target rather than a second copy of the driver.
+// against. Increment A1 adds the Linux container and Phase B the macOS one,
+// both behind natNativeProgramOS, which shares this whole body;
+// `natNativeProgram` is a one-line wrapper naming the Windows target rather
+// than a second copy of the driver.
 func natNativeProgram(ast) {
-    return natNativeProgramOS(ast, 1)
+    return natNativeProgramOS(ast, natOSWindows())
 }
 
 // natNativeProgramOS compiles a PARSED PROGRAM to a native image for one OS.
 //
-// isWin selects the OS, and it is the ONLY OS-dependent input: the entry stub,
-// the frame's 16-byte alignment rule, the stdout write shape, and the container
-// writer all follow from it. That is the whole reason this is a parameter rather
-// than a second driver -- there is exactly one copy of the scan/plan/lower
-// sequence, so the two targets cannot disagree about a program's frame, its
-// rodata interning or its refusals.
+// targetOS is the ONLY OS-dependent input: the entry stub, the frame's 16-byte
+// alignment rule, the stdout write shape, the syscall numbers and the container
+// writer all follow from it. That is the whole reason this is a parameter
+// rather than three drivers -- there is exactly one copy of the
+// scan/plan/lower sequence, so the three targets cannot disagree about a
+// program's frame, its rodata interning or its refusals.
 //
-// The two container paths differ in a way that is NOT a parameter, and the
-// difference is load-bearing:
+// The three container paths differ in ways that are NOT parameters, and the
+// differences are load-bearing:
 //
-//   - PE resolves its patches INSIDE the linker (natPELink), because Windows
-//     rebases the image and each absolute slot needs a DIR64 relocation entry as
-//     well as a value. Getting that wrong produced a valid PE whose print lost
-//     its newline (Step 9b).
-//   - ELF is non-PIE, so the values are baked in place BEFORE linking and no
-//     relocation entry exists at all. So the ELF arm resolves rodata and the
-//     arena here, with the base arithmetic the oracle uses at
-//     pkg/native/program.go:1650-1683.
+//   - PE (Windows) resolves its patches INSIDE the linker, because the loader
+//     rebases a DYNAMIC_BASE image and each absolute slot needs a DIR64
+//     relocation entry as well as a value. Getting that wrong produced a valid
+//     PE whose print lost its newline (Step 9b).
+//   - ELF (Linux) is non-PIE, so the values are baked in place BEFORE linking
+//     and no relocation entry exists at all.
+//   - Mach-O (macOS) is a PIE: like ELF the values are baked before linking, but
+//     UNLIKE ELF dyld slides the image, so every baked absolute additionally
+//     needs a REBASE OPCODE. Without one the image loads and then reads through
+//     a pointer nobody slid -- no crash, no diagnostic, just wrong data.
 //
 // Calling natPELink for Linux (or vice versa) would not fail loudly; it would
 // produce a PE under a Linux target NAME. That is a miscompile, so the container
-// choice is made once, here, by the same isWin that chose the stub.
-func natNativeProgramOS(ast, isWin) {
+// choice is made once, here, by the same targetOS that chose the stub.
+func natNativeProgramOS(ast, targetOS) {
     let stmts = ast[1]
     let mainFn = natNativeFindMain(stmts)
     if (mainFn == 0) {
@@ -4521,6 +4576,14 @@ func natNativeProgramOS(ast, isWin) {
     // element area. All three agree with the oracle's scanLets for the same program.
     let usesStr = 0
     if (natNativeConcatSites(body) > 0) { usesStr = 1 }
+    // isWin is the BOOLEAN form of targetOS, for the two places that genuinely
+    // only care about the Windows/Unix split: the frame's 16-byte alignment rule
+    // and the stdout write SHAPE (Win64 kernel32 vs a raw syscall). Both treat
+    // Linux and macOS identically -- neither pads the frame, and both reach the
+    // kernel through a raw syscall whose NUMBER comes from the emitter state
+    // (slot 15), not from here.
+    let isWin = 0
+    if (targetOS == natOSWindows()) { isWin = 1 }
     let lay = natFrameLayout(natNativePlanBytes(plan), 0, usesStr, 0, 0, isWin)
     let frame = lay[6]
     let strTemp = lay[2]
@@ -4530,15 +4593,15 @@ func natNativeProgramOS(ast, isWin) {
     // is entry 2+k. It is computed BEFORE emission because the body needs those offsets
     // to record its rodata references, and computing them after would mean recording a
     // placeholder the linker had no way to fill.
-    // The entry stub is OS-specific and nothing else is: both stubs Mark `_start`
-    // first and Mark `karkain_main` last, so every label displacement the body and
-    // the helpers encode is identical between them. That is what lets ONE driver
-    // serve both targets.
+    // The entry stub is OS-specific and nothing else is: all three Mark
+    // `_start` first and Mark `karkain_main` last, so every label displacement
+    // the body and the helpers encode is identical between them. That is what
+    // lets ONE driver serve all three targets.
     let s = natNewEmitter(0)
-    if (isWin == 1) {
+    if (isWin == natOSWindows()) {
         s = natWinStub()
     } else {
-        s = natStartStub()
+        s = natStartStubOS(targetOS)
     }
     s = natSubRegImm32(s, natRegRSP(), frame)
     s = natNativeLower(s, body, plan, ro[1], strTemp, tbl)
@@ -4594,10 +4657,75 @@ func natNativeProgramOS(ast, isWin) {
     if (arenaLen > 0) { heap = natNativeArenaBytes0(arenaLen) }
     let hp = natFlatPairs(natStHeapPos(s), natStHeapOff(s))
 
-    if (isWin == 1) {
+    if (targetOS == natOSWindows()) {
         return ["", natPELink(text, ro[0], heap, rp, ip, ap, hp, natPETextOff(), natPETextOff())]
     }
+    if (targetOS == natOSMac()) {
+        return ["", natNativeLinkMac(s, text, ro[0], heap, rp, hp)]
+    }
     return ["", natNativeLinkLinux(s, text, ro[0], heap)]
+}
+
+// natNativeLinkMac links the macOS image: a position-independent executable
+// whose baked absolute addresses dyld slides at load time.
+//
+// Mach-O is the third shape of the three, and the distinction is what this
+// function exists to get right:
+//
+//   - PE  (Windows): resolved INSIDE the linker, because a DYNAMIC_BASE image is
+//     rebased and each absolute needs a DIR64 ENTRY as well as a value.
+//   - ELF (Linux): resolved before linking, no relocation entries -- ET_EXEC at a
+//     fixed base is never moved.
+//   - Mach-O (macOS): resolved before linking like ELF, BUT the image is a PIE
+//     (MH_PIE), so dyld DOES move it. Every baked absolute therefore needs a
+//     REBASE OPCODE telling dyld to add the slide to it, or the image loads
+//     cleanly and then dereferences a pointer nobody slid -- a failure mode that
+//     is not a crash and not a diagnostic, just wrong data.
+//
+// So the rebase sites are not an optional extra here; they are what makes the
+// resolved values correct. They are DERIVED from the same two patch lists the
+// addresses were resolved from (rodata rp and the arena hp), which is what makes
+// a missed site structurally impossible rather than merely unlikely -- the
+// oracle does the same at pkg/native/program.go:1702 (machoRebaseSiteOffsets),
+// for the reason its comment gives: a hand-kept inventory of "the places we bake
+// an address" is a second source of truth that can silently miss one.
+func natNativeLinkMac(s, text, rodata, heap, rp, hp) {
+    let hasData = false
+    if (len(heap) > 0) { hasData = true }
+    let textOff = natMachoTextOffset(hasData)
+    let base = natMachoBase()
+    // Same base arithmetic as ELF, read from the oracle: rodata follows .text,
+    // and the arena's absolute address is machoAddr(MachoDataOffset(bodyEnd)),
+    // i.e. MachoBase + the page-aligned offset -- the +natMachoBase() is what
+    // makes it an ADDRESS rather than a file offset, and dropping it would bake
+    // an offset where dyld expects an address.
+    natResolveRodata(s, base, textOff + len(text))
+    let bodyEnd = textOff + len(text) + len(rodata)
+    natResolveArena(s, base + natMachoDataOffset(bodyEnd))
+    // The rebase sites are the union of both patch lists' positions.
+    let sites = natFlatPositions(rp, hp)
+    return natMachoLink(text, rodata, heap, textOff, textOff, sites)
+}
+
+// natFlatPositions returns the POSITION half of two flat [pos, off] pair-lists
+// concatenated: entry 0 of each pair-list, in list order.
+//
+// It reads the pairs the addresses were resolved from rather than keeping its
+// own inventory, so a site cannot be added to the patch lists and forgotten
+// here. The rebase stream addresses every one of these by dyld.
+func natFlatPositions(rp, hp) {
+    let out = []
+    let i = 0
+    while (i < len(rp)) {
+        if (i % 2 == 0) { out = appendArray(out, rp[i]) }
+        i = i + 1
+    }
+    i = 0
+    while (i < len(hp)) {
+        if (i % 2 == 0) { out = appendArray(out, hp[i]) }
+        i = i + 1
+    }
+    return out
 }
 
 // natNativeLinkLinux resolves the non-PIE ELF's absolute addresses and links the

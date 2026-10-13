@@ -824,6 +824,15 @@ func TestPhase151A5_KIRPinHolds(t *testing.T) {
 	// Steps 9b/9c/9d/9e/9f/9g, their corrective change (e1a6400), and the three
 	// record-lowering commits (7d6db10, f64d394, 82bb1f3).
 	//
+	// 13729 (Phase B): the driver gained a third container (natNativeLinkMac +
+	// natFlatPositions, so the Mach-O rebase sites are derived from the same
+	// patch lists the addresses were resolved from), the emitter state grew a
+	// sixteenth slot carrying the target OS, and natSysWrite/natSysExit became
+	// OS-parameterised -- which is what lets kcc own native-x86_64-macos through
+	// the SAME driver. Measured twice on this host with
+	// `karkain kir --verify src/compiler/kir.kark` -- text=13729 verify=13729 --
+	// and never predicted.
+	//
 	// 13674 (increment A1): the whole-program driver became OS-parameterised
 	// (natNativeProgramOS) and gained an ELF arm (natNativeLinkLinux plus
 	// natResolveArena), which is what lets kcc own native-x86_64-linux through
@@ -834,8 +843,8 @@ func TestPhase151A5_KIRPinHolds(t *testing.T) {
 	// 13637 was measured twice on f08276b with kcc.exe DELETED between runs, so
 	// each count came from a fresh compile of the committed source rather than
 	// from a cached binary: text=13637 verify=13637.
-	if text != 13674 {
-		t.Errorf("whole-tree KIR pin = %d lines, want 13674 (12570 at Step 9a + 1067 from Steps 9b-9h and their corrective change + 37 for the A1 OS-parameterised driver and ELF linker arm; see the comment above for the measured chain); output follows: %s", text, out)
+	if text != 13729 {
+		t.Errorf("whole-tree KIR pin = %d lines, want 13729 (12570 at Step 9a + 1067 from Steps 9b-9h and their corrective change + 37 for the A1 OS-parameterised driver and ELF linker arm + 55 for Phase B's Mach-O arm, target-OS emitter slot and syscall parameterisation; see the comment above for the measured chain); output follows: %s", text, out)
 	}
 	t.Logf("whole-tree KIR pin: text=%d verify=%d", text, verify)
 }

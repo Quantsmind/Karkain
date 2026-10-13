@@ -66,28 +66,26 @@ import (
 //
 // Phase 151D: TRUE for native-x86_64-windows, through natNativeProgramOS(ast,1)
 // — the same driver `karkain native-ast` drives and the 9c/9e/9f/9g/9h gates
-// prove. Phase A1: ALSO TRUE for native-x86_64-linux through the same driver
-// with isWin=0. kcc still has no Mach-O emitter for a user program, so that one
-// target keeps refusing with K116 and is Go-backend-only. Do not read this
-// constant as a claim about all three; kccNativeOwnedTargets is the per-target
-// truth.
+// prove. Phase A1 adds native-x86_64-linux and Phase B native-x86_64-macos,
+// through the same driver with a different OS argument.
+//
+// The Mach-O target's evidence is STRUCTURAL only: this repository has no
+// macOS runner, so every Mach-O claim since increment 149 has been structural.
+// kcc emitting a structurally valid image is not the same claim as that image
+// running, and the two are not conflated here.
 const kccOwnsNativeTargets = true
 
 // kccNativeOwnedTargets lists the C-free targets kcc can emit for a real user
 // program. Phase 151D: Windows via natNativeProgramOS(ast, 1) — the driver
 // `karkain native-ast` drives and the 9c/9e/9f/9g/9h gates prove. Phase A1 adds
-// Linux via the SAME driver with isWin=0, so the scan/plan/lower sequence and
-// every refusal are shared and cannot drift between the two targets.
-//
-// kcc still has no Mach-O emitter for a user program: native_macho.kark lowers
-// the FIXED reference corpus that 151C2 compares against the Go oracle, and it
-// does not take a program. That target therefore keeps refusing with K116 and
-// remains Go-backend-only.
+// Linux and Phase B macOS, via the SAME driver with a different OS argument, so
+// the scan/plan/lower sequence and every refusal are shared and cannot drift
+// between the three targets.
 //
 // This is a named list rather than an inline target comparison so the ownership
 // claim is data the gate can assert on directly, instead of being re-derived
 // from each dispatch site where the two copies could drift apart.
-var kccNativeOwnedTargets = []string{NativeWindowsTarget, NativeLinuxTarget}
+var kccNativeOwnedTargets = []string{NativeWindowsTarget, NativeLinuxTarget, NativeMacOSTarget}
 
 // kccNativeOwns reports whether kcc emits targetName. False means kcc must
 // refuse it — never fall back to the Go engine for it.
@@ -376,6 +374,9 @@ func kccNativeValidateImage(img []byte, target string) error {
 		return err
 	case native.OSLinux:
 		_, _, err := native.Parse(img)
+		return err
+	case native.OSMacOS:
+		_, _, err := native.ParseMachO(img)
 		return err
 	default:
 		return fmt.Errorf("no structural validator is registered for --target %s", target)
