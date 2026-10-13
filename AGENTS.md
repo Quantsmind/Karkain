@@ -3075,6 +3075,16 @@ pads the locals region to the next 16 strictly greater**, adding 16 exactly when
 though both compute the same `localBytes` (8+8+8*N, read from the oracle source, not
 inferred). Not closed here because it lives in `natFrameLayout`, which Step 1 froze and
 every Steps 1-9c displacement is pinned against; it is 151D's whole-image-parity bar.
+**SUPERSEDED IN PART by Phase D1 (2026-10-13), and this entry is the wrong
+explanation.** The frame-layout difference above is real but it is NOT the cause of
+the 39-byte image delta, which A1 and Phase B both attributed to it. Phase D1
+measured the delta across programs with 0, 1 and 2 locals and found it **constant at
+39 bytes** -- and padding scales with the locals region, so a constant delta cannot
+be padding. The cause is **emission ORDER**, closed in Phase D1: the oracle emits
+`emitHelpers()`, then the user functions, then `_start`, so `_start` lands at the
+END of `.text`; kcc emitted the entry stub first. The entry placement is now
+correct. What remains of the delta is a CONTENT difference inside `print_int` (see
+the Phase D1 entry) and is NOT explained by this paragraph.
 **A harness trap that looked like a compiler defect**: `native-ast` once emitted 3727
 mass K107/K101 diagnostics and no image. `git stash` + retry on **pristine HEAD**
 reproduced it identically, which killed the "my change" hypothesis -- the real cause is
@@ -3504,6 +3514,57 @@ the whole 151/151A/151B/151C/151D/151P0/152/150 family (617s); `KIRPinHolds`
 typecheck (579s); `pkg/native`; `go build ./...` and `go vet ./pkg/...
 ./cmd/...`. CI gains a dedicated step *Run Phase B kcc native Mach-O gate*,
 explicitly NOT gated on GOOS because its assertions are host-independent.
+
+Also completed: **Phase D1 - emit in the oracle's order** (increment 151,
+slice D1; verdict **COMPLETE for the entry placement**; **byte-identity is
+NOT claimed and closure condition 4 remains UNMET**). **MEASURED, and the
+previously recorded explanation was WRONG.** The 39-byte kcc-vs-Go image
+delta was attributed (Step 9d, carried through A1 and Phase B) to a
+frame-padding difference. It is not padding: **padding scales with the
+locals region, and the measured delta is a CONSTANT 39 bytes across
+programs with 0, 1 and 2 locals.** A constant delta cannot be padding. The
+real cause is **emission ORDER**: the oracle runs `emitHelpers()`, then
+the user functions, then `_start` (`pkg/native/program.go:1585-1593`), so
+`_start` lands at the END of `.text` (offset 214 for `print(1)`), while kcc
+emitted the entry stub first and put it at offset 0 -- the same
+instructions in a different order. **Fix**: `natStartStubOS`/`natWinStub`
+are split so the entry sequence can be emitted without marking
+`karkain_main`; `natStartEntryOS`/`natWinEntry` do the entry alone and the
+self-contained stubs are RETAINED unchanged because the frozen Step 4 and
+Step 5/6 corpora are gated on their exact bytes (verified byte-identical
+before and after). The driver emits the helpers, then marks `karkain_main`
+and emits the body, then the entry LAST. **A SECOND DEFECT THIS EXPOSED,
+and it is the one that would have shipped silently:** passing `_start`'s new
+label offset into the linkers was not enough, because the three linkers
+take a **FILE** offset while `natLabelOff` returns an offset **WITHIN**
+`.text`. Passing it straight through put the entry 120 bytes (`textOff`)
+early -- inside `print_int`'s helper. The images were still STRUCTURALLY
+VALID and still executed (the loader only requires the entry to be inside
+the image), so **every structural gate passed while the entry pointed into
+the middle of a helper**. The correct value is `textOff + labelOffset`,
+which is what the oracle computes at `program.go:1643`. **Verified**: entry
+placement now matches the oracle's shape exactly (entry at 175 with a
+17-byte tail versus Go's 214/17 for the heapless case), and the
+kcc-produced PE still **EXECUTES** on this host and prints the right value.
+**NOT YET: full byte-identity.** The residual 39 bytes are a CONTENT
+difference in `print_int`, not ordering -- at `.text` offset 138 the oracle
+emits a standalone newline-write tail (`mov rdx,rsi; mov rsi,rdi; mov edi,1;
+mov eax,1; syscall; mov rsi,rodata; ...; ret`) where kcc inlines it. That is
+a separate slice. **A HARNESS TRAP THAT COST REAL TIME, recorded because it
+presents as a compiler bug**: a comment in `native_value.kark` quoted the
+literal main signature while explaining the measurement. `assembleProject`
+decides which sibling file "has a main" by searching the source **TEXT**, so
+the comment made that file look like the entry point, the sibling join
+dropped every other compiler source, and the whole-tree KIR count collapsed
+by **2512 lines** with a wall of undefined-function errors. The fix is to
+*describe* the signature rather than quote it; the note now says so where it
+explains the ordering. This is the same class as the Step 9d scratch-
+directory trap, and it is the second time a comment in this tree has
+changed the compiler's behaviour. KIR pin 13729 -> **13736**, measured
+twice, never predicted. Gates green: the whole 151/151A/151B/151C/151D/
+151P0/152/150/148 family (927s); `KIRPinHolds` (1407s); Phase 99 self-hosted
+parse + typecheck (1040s); `pkg/native`; `go build ./...` and `go vet
+./pkg/... ./cmd/...`.
 
 
 Also completed: **B2 seed-closure discovery job + the v1.2.0 scope amendment**
