@@ -3420,6 +3420,91 @@ project has hit repeatedly. Both produced *convincing* compiler errors from
 non-compiler causes, which is the strongest argument for checking
 `IgnoredGoFiles` and fixture bytes before debugging an emitter.
 
+Also completed: **Phase B - kcc owns `native-x86_64-macos`** (increment 151,
+slice B; verdict **COMPLETE for the emission, with execution evidence stated
+separately and NOT claimed anywhere**). 151D gave kcc the Windows PE target,
+A1 the Linux ELF, and both drove the SAME whole-program driver; Phase B adds
+the third container, so **all three C-free targets are now kcc-owned and
+nothing refuses with K116**. **MACH-O IS THE INTERESTING ONE**, and the
+reason is a correctness requirement rather than a container detail: it is the
+only POSITION-INDEPENDENT image kcc emits. The backend bakes absolute
+addresses into imm64 operands, and dyld SLIDES the image at load time -- so
+without a rebase opcode per baked address the image loads cleanly and then
+reads through a pointer nobody slid, which is **no crash and no diagnostic,
+just wrong data**. That is why the rebase sites, and not the segment table,
+are the load-bearing assertion of this slice. **Driver**
+(`src/compiler/native_value.kark`): `natNativeLinkMac` links the PIE --
+rodata and arena addresses are baked in place BEFORE linking (as ELF does), the
+arena base is `MachoBase + MachoDataOffset(bodyEnd)` (the `+MachoBase()` is
+what makes it an ADDRESS rather than a file offset, and dropping it bakes an
+offset where dyld expects an address), and the rebase sites are **DERIVED
+from the same two patch lists the addresses were resolved from**
+(`natFlatPositions` over `rp` and `hp`). Deriving rather than keeping an
+inventory makes a missed site structurally impossible, which is the oracle's
+own reasoning at `pkg/native/program.go:1702`. `natStartStub` becomes a
+wrapper over `natStartStubOS(os)`: macOS shares the Unix entry shape with
+Linux word for word -- call, `mov rdi,rax`, `mov rax`, exit-number, syscall --
+and differs ONLY in that number, which is why it is one function with a
+parameter and not a second stub. `natSysWrite`/`natSysExit` became
+OS-parameterised (Linux 1/60, Darwin `0x2000004`/`0x2000001`). **A constant
+bug I introduced and caught before it shipped, and the arithmetic-not-literal
+rule exists because of it:** my first draft wrote `134221828` for
+`0x2000004`, which is wrong by ~100 million; I caught it by decoding the
+value in the shell rather than trusting the hand conversion -- which is
+exactly the practice that caught the original 151B constant bug (that record
+says `0x0F` was written as 21). Both Darwin values are therefore written as
+ARITHMETIC (`33554432 + n`), keeping the 0x2000000 prefix visible so a wrong
+constant has to be wrong in a way a reader can spot. **The emitter state
+grows a SIXTEENTH slot** (the target OS) rather than threading an OS argument
+through ~16 call sites inside the frozen print helpers; `natNewEmitter` stays
+the only constructor, so this is purely additive -- the diff removes exactly
+ONE line, the 15-element constructor array becoming 16, and no previously
+shipped byte moved. **Seam** (`pkg/cli/kcc_native.go`): macOS joins
+`kccNativeOwnedTargets` and `kccNativeValidateImage` gains its `ParseMachO`
+branch. **Gate** `pkg/cli/phase151d_macho_test.go` **4 tests / 12 subtests
+PASS**: validated by the **ORACLE's** `ParseMachO`, which checks MH_PIE, the
+exact segment set and protections, page-aligned placement, the entry and
+DECODES the rebase stream (rejecting a stream with no DONE, bytes after DONE,
+a non-POINTER type, the wrong segment, or an over-long uleb128); `MH_PIE` is
+asserted against a literal stated from the Mach-O specification rather than
+against the writer's own unexported constant, because an assertion quoting the
+code under test passes when both are wrong the same way. **The rebase count is
+asserted as a RELATIONSHIP, not per-component numbers, and the first draft
+got that wrong**: it guessed "+2 for the arena" and was wrong by 3. The reason
+is that the arena is reachable in this subset ONLY through string
+concatenation -- MEASURED on the committed compiler, `let a = [1, 2, 3]`
+carries no arena at all (2 rebase sites, identical to `print(1)`) -- so a
+concatenating program cannot add the arena without ALSO adding the string
+literals, and the guess conflated the two. The assertion is therefore a floor
+plus a growth check (`no_arena` = 2 sites and no `__DATA`; a concatenating
+program has strictly more and DOES carry `__DATA`), which is what a
+hand-maintained site inventory cannot satisfy: add an arena reference to the
+patch list, forget the rebase list, and every other structural check still
+passes because the stream stays well-formed -- the count simply stops moving.
+The arena case also pins that `.text` **MOVES** (352 -> 424, because the
+extra `LC_SEGMENT_64` shifts it) and every rebase site with it; a driver that
+computed the text offset before knowing whether an arena existed would emit
+opcodes pointing 72 bytes from the real addresses. **Windows and Linux are
+rebuilt and re-validated**, since Phase B touched the shared write path both
+use. **WHAT IS NOT CLAIMED, stated once: EXECUTION.** There is **no macOS
+runner in CI** (every job is ubuntu or windows) and no Intel-Mac host in the
+project's history, so every Mach-O claim since increment 149 has been
+structural; "kcc emits a Mach-O" and "that Mach-O runs" are different claims
+and only the first is supported. **Three gates that asserted a macOS refusal
+were inverted or rewritten rather than deleted** -- the K116 branch is the
+honest path and must stay reachable for anything kcc genuinely cannot lower,
+and a gate that only ever asserts success cannot tell a working refusal from a
+dead one -- and `TestPhase151A9D_NoGoFallback` is now driven by the
+**OWNERSHIP DATA** across all three targets. It had been hand-edited twice
+(Linux in A1, macOS in Phase B), so a fourth target will now be covered the
+day it is registered rather than the day someone remembers. KIR pin 13674 ->
+**13729**, measured twice, never predicted. Gates green: Phase B 4/4; A1 6/6;
+the whole 151/151A/151B/151C/151D/151P0/152/150 family (617s); `KIRPinHolds`
+(489s); Phase 122 `KIRContinuity` (1216s); Phase 99 self-hosted parse +
+typecheck (579s); `pkg/native`; `go build ./...` and `go vet ./pkg/...
+./cmd/...`. CI gains a dedicated step *Run Phase B kcc native Mach-O gate*,
+explicitly NOT gated on GOOS because its assertions are host-independent.
+
 
 Also completed: **B2 seed-closure discovery job + the v1.2.0 scope amendment**
 (verdict **COMPLETE** as a change; **B2 itself remains OPEN and unproven** --
