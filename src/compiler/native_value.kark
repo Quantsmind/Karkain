@@ -1448,22 +1448,23 @@ func natStartStub() {
     return natStartStubOS(natOSLinux())
 }
 
-// natStartStubOS is the Unix-family entry: call karkain_main, move its return
-// into RDI (the exit status), load the OS's exit syscall number, syscall.
+// natStartEntryOS emits ONLY the `_start` sequence: mark the entry, call
+// karkain_main, move main's return into RDI, load the OS's exit syscall number,
+// syscall.
+//
+// It deliberately does NOT mark `karkain_main`. That is the whole point of
+// separating it from natStartStubOS: the oracle emits helpers, then the user
+// functions, and only THEN `_start` (pkg/native/program.go:1585-1593), so
+// `_start` sits at the END of .text. Marking `karkain_main` from the entry
+// sequence would force `_start` to be emitted FIRST, and the two images would
+// then carry the same instructions in a different order -- a CONSTANT byte
+// delta that was previously mis-attributed to frame padding.
 //
 // macOS shares this shape with Linux word for word -- the difference is ONLY the
 // exit number (0x2000001 vs 60). That is why it is one function with a
-// parameter rather than a second stub: a duplicate would be a second place for
-// the two entry paths to drift apart, and the identical shape is precisely what
-// makes the sharing correct.
-//
-// It creates its OWN emitter state (as every stub does) and stamps the target OS
-// onto it before emitting, because the exit tail reads it from there. The stamp
-// is what makes natWriteStdout -- reached later, from the body and the print
-// helpers -- use the Darwin write number in the same image.
-func natStartStubOS(os) {
-    let s = natNewEmitter(0)
-    s = natSetTargetOS(s, os)
+// parameter rather than a second entry: a duplicate would be a second place for
+// the two entry paths to drift apart.
+func natStartEntryOS(s, os) {
     s = natMark(s, "_start")
     s = natCall32(s)
     let r = natRel32(s, "karkain_main")
@@ -1473,7 +1474,18 @@ func natStartStubOS(os) {
     let isMac = 0
     if (os == natOSMac()) { isMac = 1 }
     s = natMovRegImm32(s, natRegRAX(), natSysExit(isMac))
-    s = natSyscall(s)
+    return natSyscall(s)
+}
+
+// natStartStubOS is the Unix-family entry, self-contained: `_start` immediately
+// followed by the `karkain_main` label. It is RETAINED unchanged because the
+// frozen 151A Step 4 corpus (natStartCorpus) is gated on its exact bytes and on
+// the forward rel32 reference it contains; the whole-program driver uses
+// natStartEntryOS instead so `_start` can be emitted last.
+func natStartStubOS(os) {
+    let s = natNewEmitter(0)
+    s = natSetTargetOS(s, os)
+    s = natStartEntryOS(s, os)
     s = natMark(s, "karkain_main")
     return s
 }
@@ -1698,15 +1710,27 @@ func natWinExitTail(s) {
 
 // natWinStub emits the complete Windows _start in the oracle order: alignment,
 // bootstrap, call main, Win64 exit.
-func natWinStub() {
-    let s = natNewEmitter(0)
+// natWinEntry emits ONLY the Windows `_start` sequence -- alignment fix, the
+// loader-independent PEB bootstrap, the call to karkain_main and the Win64 exit
+// tail -- and does NOT mark `karkain_main`, for the same reason
+// natStartEntryOS does not: the oracle emits `_start` LAST, after the helpers
+// and the user functions.
+func natWinEntry(s) {
     s = natMark(s, "_start")
     s = natAndRspNeg16(s)
     s = natWinBootstrap(s)
     s = natCall32(s)
     let r = natRel32(s, "karkain_main")
     s = r[0]
-    s = natWinExitTail(s)
+    return natWinExitTail(s)
+}
+
+// natWinStub is the self-contained Windows entry, RETAINED unchanged because the
+// frozen 151A Step 5/6 corpus (natWinCorpus shape 0) is gated on its exact
+// 982-byte bytes. The whole-program driver uses natWinEntry instead.
+func natWinStub() {
+    let s = natNewEmitter(0)
+    s = natWinEntry(s)
     s = natMark(s, "karkain_main")
     return s
 }
@@ -4597,12 +4621,46 @@ func natNativeProgramOS(ast, targetOS) {
     // `_start` first and Mark `karkain_main` last, so every label displacement
     // the body and the helpers encode is identical between them. That is what
     // lets ONE driver serve all three targets.
+    // EMISSION ORDER matches the oracle exactly, and that is what makes byte-identity
+    // reachable rather than merely aspirational. The oracle runs
+    // emitHelpers(), then the user functions, then `_start`
+    // (pkg/native/program.go:1585-1593), so `_start` lands at the END of .text
+    // and `karkain_main` sits before it.
+    //
+    // This order was MEASURED, not assumed: for a one-statement main that prints a
+    // literal, the Go image puts `_start` at .text offset 214 and kcc put it at
+    // 0, giving a CONSTANT 39-byte delta across programs with 0, 1 and 2
+    // locals. A constant delta cannot be frame padding -- padding scales with
+    // the locals region -- and the difference was therefore the ORDER, not the
+    // layout. The previous record attributed it to padding; that attribution
+    // was wrong and is corrected here.
+    //
+    // (The example program is described rather than quoted on purpose:
+    // assembleProject decides which sibling file "has a main" by searching the
+    // source TEXT for the literal signature, so quoting that signature in a
+    // comment here made THIS file look like the entry point, and the sibling
+    // join then silently dropped every other compiler source. It surfaced as a
+    // 2512-line collapse of the whole-tree KIR count plus a wall of
+    // undefined-function errors -- an assembler behaviour, not a compiler one.)
+    //
+    // The helpers come first because the body CALLS them, and the oracle emits
+    // them first for the same reason. rel32 fixups resolve against label offsets
+    // in natFinish, so order is free at emission time and costs nothing: only the
+    // final byte layout is affected.
     let s = natNewEmitter(0)
-    if (isWin == natOSWindows()) {
-        s = natWinStub()
-    } else {
-        s = natStartStubOS(targetOS)
+    s = natSetTargetOS(s, targetOS)
+    // helpers first: print_int, then print_str when the program can produce a
+    // string, then the arena allocator when it allocates.
+    s = natPrintIntBody(s, isWin, 0, 1)
+    if (natNativeUsesString(body)) {
+        s = natPrintStrBody(s, isWin, 1)
     }
+    if (natNativeArenaBytes(body) > 0) {
+        s = natAllocHelper(s, natNativeArenaBytes(body))
+    }
+    // then the user function, in the oracle's own shape: a label, a frame
+    // prologue, the body, the epilogue.
+    s = natMark(s, "karkain_main")
     s = natSubRegImm32(s, natRegRSP(), frame)
     s = natNativeLower(s, body, plan, ro[1], strTemp, tbl)
     // The implicit `return 0` is emitted ONLY when the program has no explicit
@@ -4620,25 +4678,17 @@ func natNativeProgramOS(ast, targetOS) {
     }
     s = natAddRegImm32(s, natRegRSP(), frame)
     s = natRet(s)
-    // winWrite selects the stdout write SHAPE, not the destination: 1 is the Win64
-    // GetStdHandle/WriteFile pair through the IAT that the entry bootstrap
-    // published, 0 is the raw Linux `write` syscall (natSysWrite = 1 on
-    // linux/amd64). Both write fd 1 to stdout; only the mechanism is OS-specific.
-    s = natPrintIntBody(s, isWin, 0, 1)
-    // print_str, in the SAME state and only when the program can produce a string.
-    //
-    // The gating is what keeps every string-free image byte-identical: an unused helper
-    // costs bytes and nothing else, but print_int is emitted unconditionally today, so
-    // the honest comparison is against today's behaviour rather than an ideal.
-    if (natNativeUsesString(body)) {
-        s = natPrintStrBody(s, isWin, 1)
+    // and `_start` LAST, calling into the function marked above.
+    if (isWin == 1) {
+        s = natWinEntry(s)
+    } else {
+        s = natStartEntryOS(s, targetOS)
     }
-    // The arena and its allocator, ONLY when the program concatenates. It is emitted
-    // AFTER the body because the body CALLS it; a forward call would patch to a
-    // label that does not exist yet.
-    if (natNativeArenaBytes(body) > 0) {
-        s = natAllocHelper(s, natNativeArenaBytes(body))
-    }
+    // The entry is `_start`'s offset WITHIN .text, read from the label table
+    // after it is marked. It must be read AFTER the entry sequence is emitted,
+    // because that is what fixes the label's offset -- reading it before would
+    // capture a placeholder.
+    let entryOff = natLabelOff(s, "_start")
     let text = natFinish(s)
 
     // The rodata patch list is what makes the linker resolve the immediates AND
@@ -4658,12 +4708,18 @@ func natNativeProgramOS(ast, targetOS) {
     let hp = natFlatPairs(natStHeapPos(s), natStHeapOff(s))
 
     if (targetOS == natOSWindows()) {
-        return ["", natPELink(text, ro[0], heap, rp, ip, ap, hp, natPETextOff(), natPETextOff())]
+        // The PE entry follows the same rule as ELF and Mach-O: it is the
+        // FILE offset of `_start`, which is natPETextOff() + the label's offset
+        // within .text. It was previously hardcoded to natPETextOff(), which was
+        // correct only while `_start` was emitted first. It is passed as a FILE
+        // offset for the same reason the other two are -- the loader compares it
+        // against BaseOfCode.
+        return ["", natPELink(text, ro[0], heap, rp, ip, ap, hp, natPETextOff(), natPETextOff() + entryOff)]
     }
     if (targetOS == natOSMac()) {
-        return ["", natNativeLinkMac(s, text, ro[0], heap, rp, hp)]
+        return ["", natNativeLinkMac(s, text, ro[0], heap, rp, hp, entryOff)]
     }
-    return ["", natNativeLinkLinux(s, text, ro[0], heap)]
+    return ["", natNativeLinkLinux(s, text, ro[0], heap, entryOff)]
 }
 
 // natNativeLinkMac links the macOS image: a position-independent executable
@@ -4689,7 +4745,7 @@ func natNativeProgramOS(ast, targetOS) {
 // oracle does the same at pkg/native/program.go:1702 (machoRebaseSiteOffsets),
 // for the reason its comment gives: a hand-kept inventory of "the places we bake
 // an address" is a second source of truth that can silently miss one.
-func natNativeLinkMac(s, text, rodata, heap, rp, hp) {
+func natNativeLinkMac(s, text, rodata, heap, rp, hp, entryOff) {
     let hasData = false
     if (len(heap) > 0) { hasData = true }
     let textOff = natMachoTextOffset(hasData)
@@ -4704,7 +4760,10 @@ func natNativeLinkMac(s, text, rodata, heap, rp, hp) {
     natResolveArena(s, base + natMachoDataOffset(bodyEnd))
     // The rebase sites are the union of both patch lists' positions.
     let sites = natFlatPositions(rp, hp)
-    return natMachoLink(text, rodata, heap, textOff, textOff, sites)
+    // The entry is `_start`'s real offset within .text, not textOff, for the
+    // same reason the ELF arm uses entryOff: the entry sequence is emitted
+    // LAST, matching the oracle's order.
+    return natMachoLink(text, rodata, heap, textOff, textOff + entryOff, sites)
 }
 
 // natFlatPositions returns the POSITION half of two flat [pos, off] pair-lists
@@ -4750,7 +4809,7 @@ func natFlatPositions(rp, hp) {
 // header COUNT does: one PT_LOAD for a heapless program, two for one with an
 // arena. That is the same rule natELFLink enforces, so the two are computed from
 // one expression rather than restated.
-func natNativeLinkLinux(s, text, rodata, heap) {
+func natNativeLinkLinux(s, text, rodata, heap, entryOff) {
     let phnum = 1
     if (len(heap) > 0) { phnum = 2 }
     let textOff = natEhSize() + natPhSize() * phnum
@@ -4769,7 +4828,16 @@ func natNativeLinkLinux(s, text, rodata, heap) {
     // natELFLink validates against, so the two agree by arithmetic and not by
     // coincidence. It is stated because Step 9b shipped the mistake of handing a
     // linker error STRING back as if it were an image.
-    return natELFLink(text, rodata, heap, textOff, textOff)
+    //
+    // The ENTRY is `_start`'s real label offset, NOT textOff. The oracle's entry
+    // is `textOff + b.e.labels["_start"]` (pkg/native/program.go:1643), and since
+    // the helpers and the user function are emitted BEFORE `_start` that offset
+    // is not zero. Passing textOff here assumed `_start` was the first byte --
+    // true while the stub was emitted first, false once the emission order
+    // matched the oracle. The image was still STRUCTURALLY VALID and still
+    // executed, because an entry inside .text is accepted; it just entered
+    // print_int's helper instead of the entry stub.
+    return natELFLink(text, rodata, heap, textOff, textOff + entryOff)
 }
 
 // natResolveArena writes the arena's absolute addresses into the emitted bytes,
