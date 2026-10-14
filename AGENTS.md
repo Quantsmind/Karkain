@@ -3621,6 +3621,61 @@ parse + typecheck (882s); `pkg/native`; `go build ./...` and `go vet ./pkg/...
 ./cmd/...`. CI gains a dedicated step *Run Phase D2 kcc/Go native byte-identity
 gate*.
 
+Also completed: **Phase D3 - allocating programs are byte-identical too**
+(increment 151, slice D3; verdict **COMPLETE for the covered corpus**;
+closure condition 4 is now met for every shape the gate covers, and the
+remaining gaps are recorded rather than closed). Phase D2 closed
+byte-identity for the non-allocating subset and PINNED the allocating case as
+still-differing; D3 closes it and, in the same pass, **widens the corpus** --
+which is how the three defects below were found, since the five shapes that
+happened to differ were all in the int/string value model. **THREE REAL
+DEFECTS, each found by dumping both images and comparing.** (1) **The arena
+bound was NOT floored.** The oracle floors the DATA size at `heapMinSize =
+1024` (`program.go:574`, applied at `:890`) so that "trivial programs get a
+usable arena without the bound arithmetic having to be exact". kcc used the
+exact bound alone, so a program concatenating two short literals got a 20-byte
+arena where the oracle's is 1040 -- and the arena is part of the image, so the
+segment's filesz differed by 1020 bytes and every baked arena address moved with
+it. **The ORDER matters** and follows the oracle: `arenaLen = heapHeaderLen +
+heapSize` with the floor applied to `heapSize` ALONE (`program.go:1618`);
+folding the header in before the floor gives 1024 instead of 16 + 1024, which
+was my first attempt and was 16 bytes short. (2) **The alloc call site carried
+the same unconditional `sub rsp, 8`** the print sites did, with the same root
+cause -- Win64-only, and it misaligns the callee on Linux/macOS. Now emitted on
+Windows only, matching D2's treatment of the print sites. (3)
+**`natLoadScaled8` omitted REX.W, and its comment argued it should**: "this is
+an 8-bit load and the W bit would ask for an operand size it lacks". That
+reasoning is **wrong**. `0F B6` is `movzx r32, r/m8`, and REX.W promotes the
+**destination** to r64 -- the source is still one byte either way, so nothing is
+lost, and promoting the written register is exactly what a byte copy of a
+64-bit buffer wants. The oracle passes `true` as `sibRex`'s REX.W argument
+(`pkg/native/emit.go:1081-1086`). kcc emitted `41 0F B6` where the oracle emits
+`49 0F B6` -- a one-byte difference that shifted every following displacement.
+**A CONSTANT BUG I introduced and caught before it shipped, and the 151B
+record's rule exists for exactly this**: I first wrote the fix as
+`natMask(13) | natMask(8)`, reasoning selector 8 was the REX.W bit. Selector 8
+is the **0x85 jnz opcode**; REX.W is **selector 14**. The mask table is read,
+not assumed, and the comment now names the selector and says why. **RESULT**:
+`print(42)`, a single local, two locals, a string literal **and** a string
+concatenation are all byte-identical to the Go oracle. **THE CORPUS WAS
+WIDENED** in the same pass, and three more shapes are measurably still
+different -- `array_index` (kcc 481 vs go **1096**, by far the largest),
+`len_of_array` (439 vs 454), `return_value` (348 vs 353) -- and are now
+**asserted to DIFFER** so the gap cannot be forgotten. The allocating case moved
+OUT of the known-non-parity list when that gate **FAILED**, which is the signal
+the gate exists to give. **TWO Step 9g expectations were pinning the divergence
+rather than a property**: the arena-span test asserted the exact pre-floor
+bound, and the alloc-encoding guard used the pre-floor span as its precondition.
+Both now follow the oracle's rule, and the exhaustion-unreachability property is
+restated independently of the floor -- an arena is never **smaller** than the
+exact proof bound, which is what makes exhaustion unreachable. **The Windows PE
+still EXECUTES on this host and prints 42**; macOS still emits; and the Step 9g
+**execution** goldens pass with exact bytes, so the floored arena is proven by
+execution rather than by assertion. KIR pin 13743 -> **13753**, measured twice,
+never predicted. Gates green: the whole 151/151A/151B/151C/151D/151P0/152/150/
+148 family (1067s); `KIRPinHolds` (827s); Phase 99 self-hosted parse +
+typecheck (993s); `pkg/native`; `go build ./...` and `go vet ./pkg/... ./cmd/...`.
+
 
 Also completed: **B2 seed-closure discovery job + the v1.2.0 scope amendment**
 (verdict **COMPLETE** as a change; **B2 itself remains OPEN and unproven** --
