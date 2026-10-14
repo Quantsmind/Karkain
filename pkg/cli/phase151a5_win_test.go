@@ -824,13 +824,13 @@ func TestPhase151A5_KIRPinHolds(t *testing.T) {
 	// Steps 9b/9c/9d/9e/9f/9g, their corrective change (e1a6400), and the three
 	// record-lowering commits (7d6db10, f64d394, 82bb1f3).
 	//
-	// 13753 (Phase D3): the arena bound is floored the way the oracle floors it
+	// 13755 (Phase D4): the arena bound is floored the way the oracle floors it
 	// (heapMinSize on the DATA size, header added after), the alloc call site
 	// follows the same Win64-only alignment rule as the print sites, and
 	// natLoadScaled8 sets REX.W as the oracle's sibRex(true, ...) does -- the
 	// last three defects standing between an ALLOCATING program and byte-identity.
 	// Measured twice on this host with `karkain kir --verify src/compiler/kir.kark`
-	// -- text=13753 verify=13753 -- and never predicted.
+	// -- text=13755 verify=13755 -- and never predicted.
 //
 // 13743 (Phase D2): the driver now emits the SAME BYTES as the Go oracle for
 	// the non-allocating subset -- print_str unconditionally, the oracle's
@@ -865,7 +865,7 @@ func TestPhase151A5_KIRPinHolds(t *testing.T) {
 // 13637 was measured twice on f08276b with kcc.exe DELETED between runs, so
 	// each count came from a fresh compile of the committed source rather than
 	// from a cached binary: text=13637 verify=13637.
-	if text != 13753 {
+	if text != 13755 {
 		t.Errorf("whole-tree KIR pin = %d lines, want 13743 (12570 at Step 9a + 1067 from Steps 9b-9h and their corrective change + 37 for the A1 OS-parameterised driver and ELF linker arm + 55 for Phase B's Mach-O arm, target-OS emitter slot and syscall parameterisation + 7 for Phase D1's oracle emission order and split entry stub + 7 for Phase D2's oracle reconciliation; see the comment above for the measured chain); output follows: %s", text, out)
 	}
 	t.Logf("whole-tree KIR pin: text=%d verify=%d", text, verify)

@@ -3705,7 +3705,21 @@ func natArrayValue(s, off, elems) {
     while (i < len(elems)) {
         s = natMovRegImm64(s, natRegRAX(), int(intLitVal(elems[i])))
         s = natLoadStack(s, natRegRBX(), off)
-        s = natMovRegImm32(s, natRegRCX(), i)
+        // 64-bit immediate into RCX, NOT the 32-bit form.
+        //
+        // Two reasons, and the second is the one that bites. (1) The oracle
+        // emits MovRegImm64 for the index (program.go, emitArrayValue), so the
+        // immediate is the same 10 bytes either side. (2) natMovRegImm32 emits
+        // a bare `B9+rd` with NO REX prefix -- correct for rax..rdi, wrong for
+        // RCX, because B9 with mod=3 and reg=001 *is* `mov ecx, imm32`, so the
+        // index landed in the low half and the scaled store read the high half.
+        // RCX is exactly the register the scaled form uses as its index, so the
+        // bug is in the one register that cannot absorb it.
+        //
+        // This is the same class as the D2 operand-form fixes (int literals
+        // computed straight into RDI) and as the D3 natHeapRef fix: a 32-bit
+        // immediate is only valid for the low eight registers.
+        s = natMovRegImm64(s, natRegRCX(), i)
         s = natStoreScaled64(s, natRegRAX(), natRegRBX(), natRegRCX(), 8, 0)
         i = i + 1
     }
@@ -4559,6 +4573,22 @@ identName(callArgs(pv)[0]))
                     }
                 }
             }
+            // Route the return through the single teardown the label marks, the
+            // way the oracle does (program.go:4900: `b.e.Jmp(name + "$ret")`,
+            // emitted by the ReturnStmt case of the statement walker, AFTER
+            // emitReturn has put the value in RAX).
+            //
+            // The value is already in RAX and the jump preserves it, so the
+            // epilogue that follows the label sees it unchanged. Emitting the
+            // teardown inline at each return instead would be the same bytes
+            // once, and would duplicate it as soon as a program had two returns
+            // -- so this is not only about the missing 5 bytes.
+            //
+            // natJmp, NOT natCall32 + natRel32. That pairing is the `call`
+            // idiom (0xE8) and the two differ by exactly one byte; Step 8e
+            // records making this mistake once already, where a bare movabs
+            // with no jump at all came out the other end.
+            s = natJmp(s, "karkain_main$ret")
         }
         }
         i = i + 1
@@ -4732,6 +4762,20 @@ func natNativeProgramOS(ast, targetOS) {
         // was one of the last operand-form differences keeping the images apart.
         s = natXorRegReg(s, natRegRAX())
     }
+    // The `$ret` label and the jump that reaches it, both of which kcc was
+    // missing entirely.
+    //
+    // The oracle marks `<name>$ret` HERE, after the implicit-return zeroing and
+    // before the frame teardown (program.go:4861), and every `return`
+    // statement ends with `jmp <name>$ret` (program.go:4900). kcc emitted the
+    // value and then the epilogue inline, so the label had no reason to exist --
+    // and the missing 5-byte `jmp rel32` was the whole of the return_value gap.
+    //
+    // Why the oracle routes every return through one label rather than inlining
+    // the epilogue at each site: the frame teardown (AddRsp, then the Phase-150C
+    // callee-saved pops) has to be emitted exactly ONCE per function, after the
+    // `returned` flag is known. A `jmp` to it is how that is arranged.
+    s = natMark(s, "karkain_main$ret")
     s = natAddRegImm32(s, natRegRSP(), frame)
     s = natRet(s)
     // and `_start` LAST, calling into the function marked above.
