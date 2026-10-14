@@ -3566,6 +3566,61 @@ twice, never predicted. Gates green: the whole 151/151A/151B/151C/151D/
 parse + typecheck (1040s); `pkg/native`; `go build ./...` and `go vet
 ./pkg/... ./cmd/...`.
 
+Also completed: **Phase D2 - kcc and the Go oracle emit IDENTICAL bytes**
+(increment 151, slice D2; verdict **COMPLETE for the non-allocating subset**;
+**closure condition 4 is PARTIALLY met and is NOT claimed as fully met**).
+This is the **first byte-identity between kcc and `pkg/native` for a real user
+program**, and it is the direct evidence for v1.2.0 closure condition 4. After
+D1 corrected the root cause to emission ORDER and fixed entry placement, this
+slice closed the remaining operand-form differences. **MEASURED, not assumed**:
+both `.text` sections were dumped and mapped region by region, and `print_int`
+was **already byte-identical** (137 bytes each side) -- the 39-byte gap was four
+separate differences. (1) **`print_str` was gated** on the program using
+strings, but the oracle emits it as part of the standard helper set
+(`program.go:2475-2481`) so it is present in EVERY image. The gate's stated
+reason -- "keeps every string-free image byte-identical" -- was **circular**: it
+optimised against an invented baseline rather than the one parity is measured
+against. Emitting it unconditionally closed 41 bytes on every string-free
+program. (2) **The Win64 stack alignment was applied to all three targets.** The
+oracle applies `AndRspNeg16` ONLY inside the Windows branch of the entry
+(`program.go:1594-1600`), so on Linux/macOS main is entered with `rsp%16==8` and
+a call from main leaves its callee at 0, which is what the ABI wants -- kcc's
+extra `sub rsp,8` therefore **MISALIGNED the callee**. It went unnoticed
+because `print_int` uses no aligned SSE spills, so **the bytes were wrong and
+the program still ran**, which is the failure mode a byte gate exists to catch
+and an execution gate alone cannot. Now emitted on Windows only. (3) **An int
+literal was computed straight into RDI** with a 32-bit immediate; the oracle
+computes into RAX with a 64-bit immediate and then moves (`program.go:5887`) --
+5 bytes versus 10, plus a missing move. The same 32-bit form was in four other
+int-literal sites (`let`, array element, assignment rhs, field value) and in
+the return path. (4) **An identifier in print position loaded straight into
+RDI** where the oracle loads into RAX and moves, and the implicit `return 0`
+used `mov eax,0` where the oracle zeroes with `XorRegReg(RAX)`
+(`program.go:4860`). **RESULT, measured on the committed compiler**: `print(42)`,
+a single local, two locals and a string literal are now **BYTE-IDENTICAL** to
+the Go oracle. For `print(42)` the kcc sha is `237f5f1ab09a...`, which is the
+exact sha the 151 baseline recorded for the silent-Go-fallback case -- so the
+oracle's output is unchanged and kcc now reproduces it exactly, which is a
+stronger statement than "the two happen to agree today". **Gate**
+`pkg/cli/phase151d_parity_test.go` is a **DIFFERENTIAL, not a golden, and that is
+the point**: for most of increment 151 the current bytes were wrong, so a golden
+would have frozen a 39-byte divergence and called it expected. It also pins the
+**REMAINING known difference** -- an allocating program's arena bytes -- by
+asserting they still **DIFFER**, which turns "we know this differs" from a
+comment nobody re-reads into an assertion that has to be updated on purpose;
+a missing assertion is how a known gap quietly becomes an unknown one.
+**STILL NOT PARITY:** an allocating program (string concatenation, and by
+extension maps and `push`) differs, because the arena allocator is emitted by a
+path whose bytes are not yet reconciled (kcc 4116 vs go 5136). **The Windows PE
+still EXECUTES on this host and prints 42**; macOS still emits; and the frozen
+Step 7 `print_int` corpus is byte-**unchanged**, because the changes are to CALL
+SITES and operand forms, not to the helper itself. KIR pin 13736 -> **13743**,
+measured twice, never predicted. Gates green: the whole 151/151A/151B/151C/
+151D/151P0/152/150/148 family (926s); `KIRPinHolds` (790s); Phase 99 self-hosted
+parse + typecheck (882s); `pkg/native`; `go build ./...` and `go vet ./pkg/...
+./cmd/...`. CI gains a dedicated step *Run Phase D2 kcc/Go native byte-identity
+gate*.
+
 
 Also completed: **B2 seed-closure discovery job + the v1.2.0 scope amendment**
 (verdict **COMPLETE** as a change; **B2 itself remains OPEN and unproven** --
