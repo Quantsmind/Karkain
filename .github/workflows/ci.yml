@@ -290,6 +290,21 @@ jobs:
       - name: Run Phase B kcc native Mach-O gate
         run: go test ./pkg/cli/ -run 'TestPhaseB_' -count=1 -timeout 30m -v
 
+      # Phase D2, kcc/Go native BYTE-IDENTITY. This is the direct evidence for
+      # v1.2.0 closure condition 4, and it is a differential rather than a
+      # golden ON PURPOSE: a golden would pin the current bytes, and for most of
+      # increment 151 the current bytes were wrong (the images differed by a
+      # constant 39 bytes for reasons nobody had measured). Comparing the two
+      # engines means the assertion can only pass if BOTH agree.
+      #
+      # The gate ALSO pins the remaining known difference -- the allocating
+      # program's arena bytes -- by asserting they still DIFFER, so a known gap
+      # cannot quietly become an unknown one. It is not gated on GOOS: the
+      # comparison is structural on every runner, and the Linux leg additionally
+      # proves an ELF built from these exact bytes runs.
+      - name: Run Phase D2 kcc/Go native byte-identity gate
+        run: go test ./pkg/cli/ -run 'TestPhaseD2_' -count=1 -timeout 30m -v
+
       # Phase 151C3, the PE32+ container. It lives in pkg/native rather than
       # pkg/cli because the differential needs the Go Builder's unexported
       # patch fields, which a pkg/cli gate cannot construct. The existing

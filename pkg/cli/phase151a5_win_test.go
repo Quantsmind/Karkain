@@ -824,7 +824,14 @@ func TestPhase151A5_KIRPinHolds(t *testing.T) {
 	// Steps 9b/9c/9d/9e/9f/9g, their corrective change (e1a6400), and the three
 	// record-lowering commits (7d6db10, f64d394, 82bb1f3).
 	//
-	// 13736 (Phase D1): the whole-program driver now emits in the ORACLE's order --
+	// 13743 (Phase D2): the driver now emits the SAME BYTES as the Go oracle for
+	// the non-allocating subset -- print_str unconditionally, the oracle's
+	// RAX-then-RDI int operand form, 64-bit int immediates, `xor eax,eax` for
+	// the implicit return, and the Win64-only stack alignment. Measured twice on
+	// this host with `karkain kir --verify src/compiler/kir.kark` -- text=13743
+	// verify=13743 -- and never predicted.
+//
+// 13736 (Phase D1): the whole-program driver now emits in the ORACLE's order --
 // helpers, then the user function, then `_start` -- which required splitting the
 // entry stub so `karkain_main` can be marked independently, and threading
 // `_start`'s real label offset into all three linkers as the entry. Measured
@@ -850,8 +857,8 @@ func TestPhase151A5_KIRPinHolds(t *testing.T) {
 // 13637 was measured twice on f08276b with kcc.exe DELETED between runs, so
 	// each count came from a fresh compile of the committed source rather than
 	// from a cached binary: text=13637 verify=13637.
-	if text != 13736 {
-		t.Errorf("whole-tree KIR pin = %d lines, want 13736 (12570 at Step 9a + 1067 from Steps 9b-9h and their corrective change + 37 for the A1 OS-parameterised driver and ELF linker arm + 55 for Phase B's Mach-O arm, target-OS emitter slot and syscall parameterisation + 7 for Phase D1's oracle emission order and split entry stub; see the comment above for the measured chain); output follows: %s", text, out)
+	if text != 13743 {
+		t.Errorf("whole-tree KIR pin = %d lines, want 13743 (12570 at Step 9a + 1067 from Steps 9b-9h and their corrective change + 37 for the A1 OS-parameterised driver and ELF linker arm + 55 for Phase B's Mach-O arm, target-OS emitter slot and syscall parameterisation + 7 for Phase D1's oracle emission order and split entry stub + 7 for Phase D2's oracle reconciliation; see the comment above for the measured chain); output follows: %s", text, out)
 	}
 	t.Logf("whole-tree KIR pin: text=%d verify=%d", text, verify)
 }
