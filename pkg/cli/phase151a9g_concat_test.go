@@ -243,15 +243,41 @@ func TestPhase151A9G_ArenaSizeIsTheProofNotAGuess(t *testing.T) {
 				t.Fatalf("arena end (%#x) must be above arena base (%#x)", end, base)
 			}
 			gotSpan := end - base
-			wantSpan := uint64(c.sites*c.total + 16)
+			// The bound is sites*total + header, FLOORED at the oracle's
+			// heapMinSize on the DATA size alone, then the header added on top
+			// (pkg/native/program.go:1618 with the floor from :574 applied at
+			// :890). Phase D3 added the floor because kcc used the exact bound
+			// while the oracle has always floored it -- so this gate was pinning
+			// a DIVERGENCE from the oracle, not a property of the proof. The
+			// proof itself is unchanged and still asserted: an arena is never
+			// SMALLER than the exact bound, which is what makes exhaustion
+			// unreachable.
+			const (
+				arenaHeader = 16
+				arenaFloor  = 1024
+			)
+			exact := c.sites*c.total + arenaHeader
+			wantSpan := uint64(exact)
+			if c.total < arenaFloor {
+				wantSpan = uint64(arenaFloor + arenaHeader)
+			}
 			if gotSpan != wantSpan {
 				t.Errorf("arena span = %d, want %d\n"+
 					"  sites=%d  totalLiteralBytes=%d\n"+
-					"  proof: sites*total + 16 = %d*%d + 16 = %d\n"+
+					"  proof: the arena is never smaller than sites*total + header = %d*%d + %d = %d,\n"+
+					"         and is floored at %d + %d = %d when that exceeds it\n"+
 					"  observed: end %#x - base %#x = %d",
 					gotSpan, wantSpan,
-					c.sites, c.total, c.sites, c.total, wantSpan,
+					c.sites, c.total, c.sites, c.total, arenaHeader, exact,
+					arenaFloor, arenaHeader, wantSpan,
 					end, base, gotSpan)
+			}
+			// The exhaustion-unreachability property, stated independently of
+			// the floor: whatever the floor did, the arena still covers the
+			// exact proof bound.
+			if gotSpan < uint64(exact) {
+				t.Errorf("arena span %d is SMALLER than the proven bound %d; "+
+					"a program in the supported subset could exhaust it", gotSpan, exact)
 			}
 		})
 	}
@@ -275,9 +301,14 @@ func TestPhase151A9G_AllocEncodesR10AndR11Correctly(t *testing.T) {
 			"emit REX.W|REX.B (0x49) with B8 + (rd & 7), and natMask(72) must be 7, " +
 			"not 11")
 	}
-	if end-base != 1*4+16 {
+	// The span is now the FLOORED one (Phase D3 aligned the arena bound with the
+	// oracle's heapMinSize floor), so the precondition below uses the same rule
+	// rather than the pre-floor exact bound. Its purpose is unchanged: this test is
+	// about the REX encoding of the two immediates, and that is only meaningful when
+	// they really are the arena base and end.
+	if end-base != uint64(1024+16) {
 		t.Errorf("arena span = %d, want %d; the encoding guard is only meaningful "+
-			"when alloc's two immediates are the arena base and end", end-base, 1*4+16)
+			"when alloc's two immediates are the arena base and end", end-base, 1024+16)
 	}
 }
 

@@ -47,6 +47,13 @@ func TestPhaseD2_KccAndGoEmitIdenticalImages(t *testing.T) {
 		{"local", "func main() {\n    let x = 123\n    print(x)\n}\n"},
 		{"two_locals", "func main() {\n    let a = 7\n    let b = 35\n    print(a)\n    print(b)\n}\n"},
 		{"string_literal", "func main() {\n    print(\"hi\")\n}\n"},
+		// Phase D3 added the allocating shape: the arena bound is floored the
+		// way the oracle floors it, and the arena image is part of the image,
+		// so getting it wrong moved every baked arena address. It was asserted
+		// to DIFFER by TestPhaseD2_KnownNonParityIsStillNonParity, which failed
+		// when it became identical -- which is the signal that this row belongs
+		// HERE.
+		{"concat", "func main() {\n    print(\"ab\" + \"cd\")\n}\n"},
 	}
 
 	for _, c := range cases {
@@ -81,43 +88,53 @@ func TestPhaseD2_KccAndGoEmitIdenticalImages(t *testing.T) {
 	}
 }
 
-// TestPhaseD2_KnownNonParityIsStillNonParity pins the REMAINING difference so it
-// cannot be forgotten.
+// TestPhaseD2_KnownNonParityIsStillNonParity pins the REMAINING differences so
+// they cannot be forgotten.
 //
-// A concatenating program allocates, and the arena allocator's bytes are not yet
-// reconciled with the oracle. Today that program produces a different image. This
-// test asserts they DIFFER. That looks backwards until you read what it is for:
+// Phase D3 closed the allocating case (it moved into the parity list above when
+// this gate failed), but the corpus was WIDENED at the same time and three
+// shapes are measurably still different:
 //
-//   - if it ever became byte-identical, that is real progress and this test
-//     FAILS, telling us to move the program into the parity list above;
-//   - if a future change made kcc emit a VALID but WRONG arena, the parity list
-//     would not catch it either -- so the structural gates still apply.
+//	array_index  kcc 481  vs go 1096   (the largest remaining gap by far)
+//	len_of_array kcc 439  vs go  454
+//	return_value kcc 348  vs go  353
 //
-// In other words it converts "we know this differs" from a comment nobody
-// re-reads into an assertion that has to be updated on purpose. A missing
-// assertion is how a known gap quietly becomes an unknown one.
+// Asserting they DIFFER is the point. It converts "we know this differs" from a
+// comment nobody re-reads into an assertion that has to be updated on purpose,
+// and it fails loudly if a shape is accidentally added to the parity list while
+// it is still wrong. A missing assertion is how a known gap quietly becomes an
+// unknown one.
 func TestPhaseD2_KnownNonParityIsStillNonParity(t *testing.T) {
 	karkain := phase130Karkain(t)
 
-	const src = "func main() {\n    print(\"ab\" + \"cd\")\n}\n"
-	kccRes := nativeBuildWithEngine(t, karkain, src, NativeLinuxTarget, "kcc", "concat-kcc.elf")
-	if kccRes.ExitCode != 0 || len(kccRes.Image) == 0 {
-		t.Fatalf("kcc build produced no image (exit %d):\n%s", kccRes.ExitCode, kccRes.Output)
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{"array_index", "func main() {\n    let a = [3, 5, 7]\n    print(a[1])\n}\n"},
+		{"len_of_array", "func main() {\n    let a = [3, 5, 7]\n    print(len(a))\n}\n"},
+		{"return_value", "func main() {\n    let z = 7\n    return z\n}\n"},
 	}
-	goRes := nativeBuildWithEngine(t, karkain, src, NativeLinuxTarget, "go", "concat-go.elf")
-	if goRes.ExitCode != 0 || len(goRes.Image) == 0 {
-		t.Fatalf("go build produced no image (exit %d):\n%s", goRes.ExitCode, goRes.Output)
-	}
-	kccBytes, goBytes := kccRes.Image, goRes.Image
 
-	kh := sha256.Sum256(kccBytes)
-	gh := sha256.Sum256(goBytes)
-	if kh == gh {
-		t.Errorf("the allocating program is now byte-identical (sha %x). That is "+
-			"progress: move it out of the known-non-parity list and into "+
-			"TestPhaseD2_KccAndGoEmitIdenticalImages so it is covered by the parity "+
-			"assertion.", kh)
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			kccRes := nativeBuildWithEngine(t, karkain, c.src, NativeLinuxTarget, "kcc", c.name+"-kcc.elf")
+			if kccRes.ExitCode != 0 || len(kccRes.Image) == 0 {
+				t.Fatalf("kcc build produced no image (exit %d):\n%s", kccRes.ExitCode, kccRes.Output)
+			}
+			goRes := nativeBuildWithEngine(t, karkain, c.src, NativeLinuxTarget, "go", c.name+"-go.elf")
+			if goRes.ExitCode != 0 || len(goRes.Image) == 0 {
+				t.Fatalf("go build produced no image (exit %d):\n%s", goRes.ExitCode, goRes.Output)
+			}
+			kh := sha256.Sum256(kccRes.Image)
+			gh := sha256.Sum256(goRes.Image)
+			if kh == gh {
+				t.Errorf("this shape is now byte-identical (sha %x). That is progress: "+
+					"move it into TestPhaseD2_KccAndGoEmitIdenticalImages so it is covered "+
+					"by the parity assertion rather than merely noted here.", kh)
+			}
+			t.Logf("known non-parity: kcc=%d go=%d", len(kccRes.Image), len(goRes.Image))
+		})
 	}
-	t.Logf("known non-parity (arena allocator not yet reconciled): kcc=%d go=%d",
-		len(kccBytes), len(goBytes))
 }

@@ -5022,11 +5022,21 @@ func natByteCopy(s, dst, src, n, tag) {
 }
 
 func natCallAlloc(s) {
-    s = natSubRegImm32(s, natRegRSP(), 8)
+    // The Win64 stack alignment, exactly as for the print call sites: required
+    // on Windows (whose `_start` runs `and rsp, -16`), and NOT on Linux/macOS
+    // (whose `_start` does not), where it would misalign `alloc`'s frame. The
+    // oracle's alloc call site carries no compensating sub
+    // (pkg/native/program.go:2467 and the concat path beside it).
+    if (natStTargetOS(s) == natOSWindows()) {
+        s = natSubRegImm32(s, natRegRSP(), 8)
+    }
     s = natCall32(s)
     let r = natRel32(s, "alloc")
     s = r[0]
-    return natAddRegImm32(s, natRegRSP(), 8)
+    if (natStTargetOS(s) == natOSWindows()) {
+        s = natAddRegImm32(s, natRegRSP(), 8)
+    }
+    return s
 }
 
 // natRodataSection returns one offset per INPUT entry with first-use interning, so the
@@ -5190,11 +5200,36 @@ func natNativeConcatIn(e) {
 //
 // Exhaustion is therefore unreachable for a supported program and is kept anyway:
 // alloc traps with Int3 rather than writing outside the arena.
+//
+// The bound is FLOORED at natArenaMinSize, because the oracle floors it at
+// heapMinSize = 1024 (pkg/native/program.go:574, applied at :890): "floors the
+// computed arena bound so trivial programs get a usable arena without the bound
+// arithmetic having to be exact". kcc used the exact bound alone, so a program
+// concatenating two short literals got a 20-byte arena where the oracle's is
+// 1040 -- and the arena is part of the image, so the segment's filesz differed
+// by 1020 bytes and every baked arena address moved with it. That was the last
+// obstacle to byte-identity for an allocating program.
+//
+// The ORDER matters and is the oracle's: it computes arenaLen as
+// heapHeaderLen + heapSize, with the floor applied to heapSize ALONE
+// (program.go:1618). Folding the header in before the floor would make a
+// floored arena 1024 bytes instead of 16 + 1024, so the header must be added
+// after the floor has already been applied to the data size.
 func natNativeArenaBytes(stmts) {
     let sites = natNativeConcatSites(stmts)
     if (sites == 0) { return 0 }
-    return sites * natNativeStrTotalBytes(stmts) + 16
+    let dataBytes = sites * natNativeStrTotalBytes(stmts)
+    if (dataBytes < natArenaMinSize()) { dataBytes = natArenaMinSize() }
+    return dataBytes + natArenaHeaderLen()
 }
+
+// natArenaHeaderLen is the oracle's heapHeaderLen (program.go:573): the bump
+// cursor and the limit, both absolute addresses, stored inside the arena.
+func natArenaHeaderLen() { return 16 }
+
+// natArenaMinSize is the oracle's heapMinSize floor, applied to the DATA size
+// alone (program.go:574).
+func natArenaMinSize() { return 1024 }
 
 func natNativeStrTotalBytes(stmts) {
     let total = 0
