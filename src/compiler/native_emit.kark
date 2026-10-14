@@ -1196,15 +1196,31 @@ func natStoreScaled64(s, src, base, index, scale, disp) {
 // rather than an obvious failure.
 // ============================================================
 
-// natLoadScaled8 emits movzx dst8, [base + index*scale + disp].
+// natLoadScaled8 emits movzx dst, [base + index*scale + disp].
 //
-// REX only when needed (a bare 0x40 is suppressed) and deliberately WITHOUT REX.W:
-// this is an 8-bit load and the W bit would ask for an operand size it lacks.
+// REX.W IS SET, and the earlier comment here claimed it deliberately was not --
+// on the grounds that "this is an 8-bit load and the W bit would ask for an
+// operand size it lacks". That reasoning is wrong, and it was a byte-level
+// difference against the oracle that a differential caught: `0F B6` is
+// `movzx r32, r/m8`, and REX.W promotes the DESTINATION to r64. The SOURCE is
+// still a single byte either way, so nothing is lost -- what REX.W changes is
+// the width of the register written, which is exactly what a byte copy of a
+// 64-bit buffer wants.
+//
+// The oracle's LoadScaled8 passes `true` as sibRex's REX.W argument
+// (pkg/native/emit.go:1081-1086). kcc omitted it, emitting `41 0F B6` where the
+// oracle emits `49 0F B6` -- a one-byte difference that shifted every following
+// displacement and left the allocating program's image 16 bytes off.
 func natLoadScaled8(s, dst, base, index, scale, disp) {
-    let r = natMask(13)
+    // natMask(14) is the REX.W BIT (0x08). It is selector 14, NOT selector 8 --
+    // selector 8 is the 0x85 jnz opcode. Writing natMask(8) here would OR in the
+    // wrong constant entirely, which is the hand-converted-constant bug class
+    // increment 151B records (0x0F written as 21). The mask table is read, not
+    // assumed.
+    let r = natMask(13) | natMask(14)   // REX base | REX.W, like sibRex(true, ...)
     if (natRegExt(dst) == 1) { r = r | natMask(15) }
-    if (natRegExt(index) == 1) { r = r | natMask(47) }   // REX.X, NOT REX.W
-    if (natRegExt(base) == 1) { r = r | natMask(16) }
+    if (natRegExt(index) == 1) { r = r | natMask(47) }   // REX.X
+    if (natRegExt(base) == 1) { r = r | natMask(16) }    // REX.B
     if (r != natMask(13)) { s = natByte(s, r) }
     s = natByte(s, natMask(1))
     s = natByte(s, natMask(66))                          // 0xB6 movzx r32, r/m8
